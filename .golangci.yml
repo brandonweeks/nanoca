@@ -1,0 +1,47 @@
+version: "2"
+linters:
+  enable:
+    - contextcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - modernize
+    - perfsprint
+    - revive
+    - sloglint
+    - unparam
+    - usestdlibvars
+  settings:
+    errcheck:
+      verbose: true
+      exclude-functions:
+        - (*github.com/brandonweeks/nanoca.CA).Close
+        - (*github.com/brandonweeks/nanoca/storage/badger.Storage).Close
+        - (*github.com/brandonweeks/nanoca/storage/badger.Storage).CreateNonce
+    gosec:
+      excludes:
+        - G104
+        - G304
+        - G704
+        - G706
+    govet:
+      enable:
+        - nilness
+    perfsprint:
+      string-format: false
+    revive:
+      enable-default-rules: true
+      rules:
+        - name: exported
+          arguments:
+            - "disableChecksOnConstants"
+            - "disableChecksOnFunctions"
+            - "disableChecksOnMethods"
+            - "disableChecksOnTypes"
+            - "disableChecksOnVariables"
+        - name: package-comments
+          disabled: true
+formatters:
+  enable:
+    - goimports
+    - gofumpt

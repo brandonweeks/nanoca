@@ -1,0 +1,27 @@
+name: Go
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [build, lint, test]
+    name: ${{ matrix.task }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - if: matrix.task == 'build'
+        run: go build -v ./...
+      - if: matrix.task == 'lint'
+        uses: golangci/golangci-lint-action@v9.2.0
+      - if: matrix.task == 'test'
+        run: go test -v ./...
