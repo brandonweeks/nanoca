@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/fxamacker/cbor/v2 v2.9.0
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/micromdm/nanolib v0.5.1
 	github.com/micromdm/nanomdm v0.9.0
 	golang.org/x/crypto v0.48.0
