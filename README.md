@@ -37,3 +37,36 @@ defer ca.Close()
 mux := http.NewServeMux()
 mux.Handle("/", ca.Handler())
 ```
+
+### Certificate chain serving
+
+When nanoca is deployed as an intermediate CA, ACME clients need the full certificate chain to build a trust path. Pass the chain to the in-process issuer after the signer argument:
+
+```go
+// intermCert is the issuing intermediate, rootCert is the root CA.
+// Order matters: issuer of the leaf first, then its issuer, up toward the root.
+issuer := inprocess.New(intermCert, intermSigner, intermCert, rootCert)
+```
+
+The ACME certificate endpoint will return the leaf followed by each chain certificate as a PEM-encoded `application/pem-certificate-chain` response per RFC 8555 Section 7.4.2. Callers that don't pass a chain get the previous behavior (leaf only).
+
+### Remote signing oracle
+
+The `signers/remote` package provides a `crypto.Signer` that delegates signing to an external HTTP service, allowing the CA private key to live in an HSM, cloud KMS, or any custom signing service.
+
+```go
+import "github.com/brandonweeks/nanoca/signers/remote"
+
+signer, err := remote.New(
+	"https://signer.internal:8443",  // oracle URL (must be HTTPS)
+	"bearer-token",                   // Authorization header value
+	publicKeyPEM,                     // PEM-encoded ECDSA public key
+)
+```
+
+The oracle protocol is a single endpoint:
+
+- `POST /sign` with `Authorization: Bearer <token>` and JSON body `{"digest": "<base64>", "hash": "SHA-256"}`
+- Response: `{"signature": "<base64-DER>"}`
+
+The signer verifies every signature returned by the oracle against the known public key before passing it to the caller. Plain HTTP is rejected unless the oracle is on a loopback address.
