@@ -47,10 +47,18 @@ type HardwareModule struct {
 	Value []byte
 }
 
+// Certificate holds an issued certificate and its optional chain.
+//
+// ChainRaw is the authoritative representation of the chain and is persisted
+// to storage. Chain is a convenience field populated at issuance time but is
+// NOT reconstituted after a storage round-trip (JSON tags exclude it).
+// Code that consumes certificates retrieved from storage must use ChainRaw.
 type Certificate struct {
-	*x509.Certificate `json:"-"` // Exclude from JSON serialization
-	Raw               []byte     `json:"raw"`
-	SerialNumber      string     `json:"serialNumber"`
+	*x509.Certificate `json:"-"`
+	Raw               []byte              `json:"raw"`
+	SerialNumber      string              `json:"serialNumber"`
+	Chain             []*x509.Certificate `json:"-"`
+	ChainRaw          [][]byte            `json:"chainRaw,omitempty"`
 }
 
 type Directory struct {

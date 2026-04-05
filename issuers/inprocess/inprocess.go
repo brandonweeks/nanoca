@@ -15,13 +15,20 @@ import (
 type Issuer struct {
 	caCert *x509.Certificate
 	signer crypto.Signer
+	chain  []*x509.Certificate
 }
 
-// New creates a new in-process certificate issuer
-func New(caCert *x509.Certificate, signer crypto.Signer) *Issuer {
+// New creates a new in-process certificate issuer.
+//
+// The optional chain parameter specifies additional certificates to include
+// in the ACME certificate response after the leaf, per RFC 8555 Section 7.4.2.
+// Certificates must be ordered issuer-first: the CA that signed the leaf,
+// then its issuer, and so on up to (but not necessarily including) the root.
+func New(caCert *x509.Certificate, signer crypto.Signer, chain ...*x509.Certificate) *Issuer {
 	return &Issuer{
 		caCert: caCert,
 		signer: signer,
+		chain:  chain,
 	}
 }
 
@@ -55,9 +62,16 @@ func (di *Issuer) IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*
 		return nil, fmt.Errorf("failed to parse generated certificate: %w", err)
 	}
 
+	chainRaw := make([][]byte, len(di.chain))
+	for i, c := range di.chain {
+		chainRaw[i] = c.Raw
+	}
+
 	return &nanoca.Certificate{
 		Certificate:  x509Cert,
 		Raw:          certDER,
 		SerialNumber: x509Cert.SerialNumber.String(),
+		Chain:        di.chain,
+		ChainRaw:     chainRaw,
 	}, nil
 }

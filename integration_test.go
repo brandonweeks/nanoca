@@ -220,6 +220,21 @@ func TestDeviceAttestationFlow(t *testing.T) {
 			t.Logf("  Valid From: %s", parsedCert.NotBefore.Format(time.RFC3339))
 			t.Logf("  Valid Until: %s", parsedCert.NotAfter.Format(time.RFC3339))
 			t.Logf("  Certificate URL: %s", certURL)
+
+			if len(cert) < 2 {
+				t.Fatal("Expected at least two certificates in the chain (leaf + intermediate), got only one")
+			}
+
+			intermediateCert, err := x509.ParseCertificate(cert[1])
+			if err != nil {
+				t.Fatalf("Failed to parse intermediate certificate: %v", err)
+			}
+			if !intermediateCert.IsCA {
+				t.Error("Second certificate in chain should be a CA certificate")
+			}
+			if intermediateCert.Subject.CommonName != "Test Intermediate CA" {
+				t.Errorf("Intermediate common name = %v, want Test Intermediate CA", intermediateCert.Subject.CommonName)
+			}
 		} else {
 			t.Error("No certificate data returned")
 		}
@@ -259,6 +274,31 @@ func setupTestServerWithAttestation(t *testing.T) (*httptest.Server, *nanoca.CA)
 		t.Fatalf("Failed to parse CA certificate: %v", err)
 	}
 
+	intermKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate intermediate key: %v", err)
+	}
+
+	intermCertTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			CommonName: "Test Intermediate CA",
+		},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	intermCertDER, err := x509.CreateCertificate(rand.Reader, intermCertTemplate, caCert, &intermKey.PublicKey, signer)
+	if err != nil {
+		t.Fatalf("Failed to create intermediate CA certificate: %v", err)
+	}
+
+	intermCert, err := x509.ParseCertificate(intermCertDER)
+	if err != nil {
+		t.Fatalf("Failed to parse intermediate CA certificate: %v", err)
+	}
+
 	storage, err := store.New(store.Options{InMemory: true})
 	if err != nil {
 		t.Fatalf("Failed to create in-memory storage: %v", err)
@@ -266,7 +306,7 @@ func setupTestServerWithAttestation(t *testing.T) (*httptest.Server, *nanoca.CA)
 
 	ca, err := nanoca.New(
 		slog.New(slog.DiscardHandler),
-		inprocess.New(caCert, signer),
+		inprocess.New(intermCert, intermKey, intermCert, caCert),
 		nullauthorizer.New(),
 		storage,
 		ts.URL,
