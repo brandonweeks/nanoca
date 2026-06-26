@@ -6,22 +6,31 @@ A lightweight enterprise [ACME](https://datatracker.ietf.org/doc/html/rfc8555) C
 
 ```go
 import (
+	"log/slog"
+	"net/http"
+
 	"github.com/brandonweeks/nanoca"
-	"github.com/brandonweeks/nanoca/authorizers/null"
+	nullauthorizer "github.com/brandonweeks/nanoca/authorizers/null"
 	"github.com/brandonweeks/nanoca/issuers/inprocess"
 	"github.com/brandonweeks/nanoca/signers/file"
 	"github.com/brandonweeks/nanoca/storage/badger"
+	"github.com/brandonweeks/nanoca/verifiers/apple"
 )
 
+logger := slog.New(nanoca.NewContextHandler(slog.Default().Handler()))
+
+caCert, _ := /* load your *x509.Certificate */
 signer, _ := file.LoadSigner("rootCA.key")
 storage, _ := badger.New(badger.Options{InMemory: true})
 
 ca, _ := nanoca.New(
-	inprocess.New(signer),
-	null.New(),
+	logger,
+	inprocess.New(caCert, signer),
+	nullauthorizer.New(),
 	storage,
 	"https://localhost:8443",
 	nanoca.WithPrefix("/acme"),
+	nanoca.WithVerifier(apple.New(logger)),
 )
 defer ca.Close()
 
