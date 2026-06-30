@@ -26,11 +26,12 @@ func New(caCert *x509.Certificate, signer crypto.Signer) *Issuer {
 }
 
 // IssueCertificate creates a certificate from CSR and device information
-func (di *Issuer) IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+func (i *Issuer) IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+	now := time.Now()
 	template := &x509.Certificate{
 		Subject:               csr.Subject,
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		NotBefore:             now,
+		NotAfter:              now.Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
@@ -45,7 +46,7 @@ func (di *Issuer) IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*
 		template.ExtraExtensions = append(template.ExtraExtensions, *sanExt)
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, di.caCert, csr.PublicKey, di.signer)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, i.caCert, csr.PublicKey, i.signer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
