@@ -56,9 +56,14 @@ func run() error {
 		return err
 	}
 
+	issuer, err := inprocess.New(signer, caCert)
+	if err != nil {
+		return err
+	}
+
 	ca, err := nanoca.New(
 		logger,
-		inprocess.New(caCert, signer),
+		issuer,
 		nullauthorizer.New(),
 		acmeStorage,
 		*baseURL,

@@ -546,11 +546,12 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Replay-Nonce", nonce)
 	w.WriteHeader(http.StatusOK)
 
-	pemCert := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: cert.Raw,
-	})
-	_, _ = w.Write(pemCert)
+	for _, raw := range cert.ServedChain() {
+		if err := pem.Encode(w, &pem.Block{Type: "CERTIFICATE", Bytes: raw}); err != nil {
+			ca.logger.ErrorContext(ctx, "Failed to write certificate chain", "error", err)
+			return
+		}
+	}
 }
 
 func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, statusCode int, data any, nonce string) {
