@@ -37,7 +37,10 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("loading CA signer: %w", err)
 	}
 
-	certificateIssuer := inprocess.New(caCert, caSigner)
+	certificateIssuer, err := inprocess.New(caSigner, caCert)
+	if err != nil {
+		return fmt.Errorf("creating certificate issuer: %w", err)
+	}
 
 	storage, err := badger.New(badger.Options{InMemory: true})
 	if err != nil {
