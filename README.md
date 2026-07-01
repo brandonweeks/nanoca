@@ -23,9 +23,10 @@ caCert, _ := /* load your *x509.Certificate */
 signer, _ := file.LoadSigner("rootCA.key")
 storage, _ := badger.New(badger.Options{InMemory: true})
 
+issuer, _ := inprocess.New(signer, caCert)
 ca, _ := nanoca.New(
 	logger,
-	inprocess.New(caCert, signer),
+	issuer,
 	nullauthorizer.New(),
 	storage,
 	"https://localhost:8443",

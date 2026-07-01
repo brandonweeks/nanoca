@@ -1,6 +1,7 @@
 package nanoca
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/asn1"
 	"time"
@@ -47,10 +48,43 @@ type HardwareModule struct {
 	Value []byte
 }
 
+// Certificate holds an issued certificate and its full DER-encoded issuing
+// chain. ChainRaw is ordered issuer first and includes a trailing self-signed
+// root if one was supplied; it is persisted to storage as-is. The ACME
+// certificate response is built by ServedChain, which omits the root.
 type Certificate struct {
-	*x509.Certificate `json:"-"` // Exclude from JSON serialization
-	Raw               []byte     `json:"raw"`
-	SerialNumber      string     `json:"serialNumber"`
+	*x509.Certificate `json:"-"`
+	Raw               []byte   `json:"raw"`
+	SerialNumber      string   `json:"serialNumber"`
+	ChainRaw          [][]byte `json:"chainRaw,omitempty"`
+}
+
+// ServedChain returns the DER certificates for the ACME certificate response:
+// the leaf (Raw) followed by the issuing chain, with a trailing self-signed
+// root omitted per RFC 8555 Section 7.4.2 (clients already hold the root).
+func (c *Certificate) ServedChain() [][]byte {
+	chain := c.ChainRaw
+	if n := len(chain); n > 0 && isSelfSignedDER(chain[n-1]) {
+		chain = chain[:n-1]
+	}
+	return append([][]byte{c.Raw}, chain...)
+}
+
+// isSelfSignedDER reports whether a DER certificate is a self-signed root: its
+// subject equals its issuer and it is signed by its own key. The signature
+// check distinguishes a true root from a merely self-issued certificate (e.g. a
+// key-rollover bridge cert, subject==issuer but signed by a different key) that
+// must still be served. Unparseable input is treated as not self-signed, so it
+// is still served.
+func isSelfSignedDER(der []byte) bool {
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return false
+	}
+	if !bytes.Equal(cert.RawSubject, cert.RawIssuer) {
+		return false
+	}
+	return cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil
 }
 
 type Directory struct {
