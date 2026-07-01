@@ -26,37 +26,23 @@ import (
 	"golang.org/x/crypto/acme"
 )
 
-// Integration tests for nanoca ACME server
-//
-// Note: This file contains a single comprehensive end-to-end test that
-// exercises the complete ACME flow.
-
-// mockIssuanceObserver is a simple mock issuance observer for testing
 type mockIssuanceObserver struct{}
 
 func (m *mockIssuanceObserver) OnIssuance(_ context.Context, _ *nanoca.IssuanceEvent) error {
 	return nil
 }
 
-// createNullDeviceAttestation creates a null ACME Device Attestation object
-// This is useful for testing and development scenarios where no actual device attestation is available
 func createNullDeviceAttestation() map[string]any {
 	return map[string]any{
 		"fmt":     "null",
 		"attStmt": map[string]any{},
-		// Note: authData is omitted as per ACME Device Attestation specification
-		// The key authorization is used as attToBeSigned instead of authData + clientDataHash
 	}
 }
 
-// TestDeviceAttestationFlow tests the complete ACME flow including device
-// attestation challenges end-to-end
 func TestDeviceAttestationFlow(t *testing.T) {
 	t.Parallel()
 
-	ts, ca := setupTestServerWithAttestation(t)
-	defer ts.Close()
-	defer ca.Close()
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 
 	client := &acme.Client{
 		DirectoryURL: ts.URL + "/directory",
@@ -127,16 +113,13 @@ func TestDeviceAttestationFlow(t *testing.T) {
 		t.Fatalf("Failed to retrieve order: %v", err)
 	}
 
-	// Create null attestation object as per ACME Device Attestation spec
 	nullAttestation := createNullDeviceAttestation()
 
-	// Encode the attestation object as CBOR as per WebAuthn specification
 	attObjBytes, err := cbor.Marshal(nullAttestation)
 	if err != nil {
 		t.Fatalf("Failed to marshal attestation object to CBOR: %v", err)
 	}
 
-	// Base64url encode the attestation object
 	attObjB64 := base64.RawURLEncoding.EncodeToString(attObjBytes)
 
 	challengeResp := map[string]any{
@@ -177,7 +160,6 @@ func TestDeviceAttestationFlow(t *testing.T) {
 	t.Logf("Authorization status: %s", updatedAuthz.Status)
 	if updatedAuthz.Status == acme.StatusValid {
 		t.Log("Authorization is now valid - ready for certificate issuance!")
-		// break
 	}
 
 	retrievedOrder, err := client.GetOrder(ctx, order.URI)
@@ -243,8 +225,12 @@ func TestDeviceAttestationFlow(t *testing.T) {
 	}
 }
 
-// setupTestServerWithAttestation creates a test server with attestation verifiers
-func setupTestServerWithAttestation(t *testing.T) (*httptest.Server, *nanoca.CA) {
+func setupTestServerWithAttestation(t *testing.T, authorizer nanoca.Authorizer) (*httptest.Server, *nanoca.CA) {
+	t.Helper()
+	return newTestServer(t, authorizer, nil, nil)
+}
+
+func newTestServer(t *testing.T, authorizer nanoca.Authorizer, issuerOverride nanoca.CertificateIssuer, observerOverride nanoca.IssuanceObserver, extraVerifiers ...nanoca.AttestationVerifier) (*httptest.Server, *nanoca.CA) {
 	t.Helper()
 
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -304,24 +290,38 @@ func setupTestServerWithAttestation(t *testing.T) (*httptest.Server, *nanoca.CA)
 		t.Fatalf("Failed to create in-memory storage: %v", err)
 	}
 
-	issuer, err := inprocess.New(intermKey, intermCert, caCert)
-	if err != nil {
-		t.Fatalf("Failed to create certificate issuer: %v", err)
+	issuer := issuerOverride
+	if issuer == nil {
+		inproc, err := inprocess.New(intermKey, intermCert, caCert)
+		if err != nil {
+			t.Fatalf("Failed to create certificate issuer: %v", err)
+		}
+		issuer = inproc
+	}
+
+	observer := observerOverride
+	if observer == nil {
+		observer = &mockIssuanceObserver{}
+	}
+
+	opts := []nanoca.Option{nanoca.WithObserver(observer), nanoca.WithVerifier(null.New())}
+	for _, v := range extraVerifiers {
+		opts = append(opts, nanoca.WithVerifier(v))
 	}
 
 	ca, err := nanoca.New(
 		slog.New(slog.DiscardHandler),
 		issuer,
-		nullauthorizer.New(),
+		authorizer,
 		storage,
 		ts.URL,
-		nanoca.WithObserver(&mockIssuanceObserver{}),
-		nanoca.WithVerifier(null.New()),
+		opts...,
 	)
 	if err != nil {
 		t.Fatalf("Failed to create CA: %v", err)
 	}
 
 	ts.Config.Handler = ca.Handler()
+	t.Cleanup(func() { ts.Close(); _ = ca.Close() })
 	return ts, ca
 }

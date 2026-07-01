@@ -11,7 +11,13 @@ func TestAttestationVerifier(t *testing.T) {
 
 	verifier := New()
 
-	// Test valid null attestation
+	if got := verifier.Format(); got != "null" {
+		t.Errorf("Format() = %q, want null", got)
+	}
+	if got := CreateNullDeviceAttestation(); got["fmt"] != "null" {
+		t.Errorf("CreateNullDeviceAttestation() fmt = %v, want null", got["fmt"])
+	}
+
 	stmt := nanoca.AttestationStatement{
 		Format:  "null",
 		AttStmt: map[string]any{},
@@ -27,15 +33,12 @@ func TestAttestationVerifier(t *testing.T) {
 			deviceInfo.PermanentIdentifier.Identifier)
 	}
 
-	// Test format mismatch
 	stmt.Format = "android-key"
 	_, err = verifier.Verify(t.Context(), stmt, []byte("challenge"))
 	if err == nil {
 		t.Error("Verify() should fail with format mismatch")
 	}
 
-	// Test with non-empty attStmt - this should still succeed for null attestation
-	// as per ACME Device Attestation spec which allows empty or minimal content
 	stmt.Format = "null"
 	stmt.AttStmt = map[string]any{"key": "value"}
 	_, err = verifier.Verify(t.Context(), stmt, []byte("challenge"))
