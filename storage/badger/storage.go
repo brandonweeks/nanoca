@@ -85,8 +85,7 @@ func (s *Storage) CreateNonce(_ context.Context, nonce *nanoca.Nonce) error {
 	}
 
 	return s.db.Update(func(txn *badger.Txn) error {
-		entry := badger.NewEntry(nonceKey(nonce.Value), data)
-		return txn.SetEntry(entry)
+		return txn.Set(nonceKey(nonce.Value), data)
 	})
 }
 
@@ -126,23 +125,26 @@ func (s *Storage) ConsumeNonce(_ context.Context, value string, expiry time.Dura
 	return &nonce, nil
 }
 
-func (s *Storage) CreateAccount(_ context.Context, account *nanoca.Account) error {
+func putAccount(txn *badger.Txn, account *nanoca.Account) error {
 	data, err := json.Marshal(account)
 	if err != nil {
 		return fmt.Errorf("failed to marshal account: %w", err)
 	}
 
+	if err := txn.Set(accountKey(account.ID), data); err != nil {
+		return err
+	}
+
+	if len(account.KeyBytes) > 0 {
+		return txn.Set(accountKeyLookupKey(string(account.KeyBytes)), []byte(account.ID))
+	}
+
+	return nil
+}
+
+func (s *Storage) CreateAccount(_ context.Context, account *nanoca.Account) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(accountKey(account.ID), data); err != nil {
-			return err
-		}
-
-		if len(account.KeyBytes) > 0 {
-			keyHash := string(account.KeyBytes)
-			return txn.Set(accountKeyLookupKey(keyHash), []byte(account.ID))
-		}
-
-		return nil
+		return putAccount(txn, account)
 	})
 }
 
@@ -194,27 +196,12 @@ func (s *Storage) GetAccountByKey(ctx context.Context, keyThumbprint string) (*n
 }
 
 func (s *Storage) UpdateAccount(ctx context.Context, account *nanoca.Account) error {
-	_, err := s.GetAccount(ctx, account.ID)
-	if err != nil {
+	if _, err := s.GetAccount(ctx, account.ID); err != nil {
 		return errors.New("account not found")
 	}
 
-	data, err := json.Marshal(account)
-	if err != nil {
-		return fmt.Errorf("failed to marshal account: %w", err)
-	}
-
 	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(accountKey(account.ID), data); err != nil {
-			return err
-		}
-
-		if len(account.KeyBytes) > 0 {
-			keyHash := string(account.KeyBytes)
-			return txn.Set(accountKeyLookupKey(keyHash), []byte(account.ID))
-		}
-
-		return nil
+		return putAccount(txn, account)
 	})
 }
 

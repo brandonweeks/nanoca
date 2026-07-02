@@ -55,122 +55,68 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestVerify_FormatMismatch(t *testing.T) {
-	t.Parallel()
-
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format:  "tpm",
-		AttStmt: map[string]any{},
-	}
-
-	_, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Fatal("expected error for format mismatch")
-	}
-	if err.Error() != "format mismatch: expected apple, got tpm" {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestVerify_MissingX5C(t *testing.T) {
-	t.Parallel()
-
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format:  "apple",
-		AttStmt: map[string]any{},
-	}
-
-	_, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Fatal("expected error for missing x5c")
-	}
-	if err.Error() != "apple attestation statement missing x5c field" {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestVerify_InvalidX5CType(t *testing.T) {
-	t.Parallel()
-
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format: "apple",
-		AttStmt: map[string]any{
-			"x5c": "not an array",
-		},
-	}
-
-	_, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Fatal("expected error for invalid x5c type")
-	}
-	if err.Error() != "x5c field must be an array" {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestVerify_EmptyX5C(t *testing.T) {
-	t.Parallel()
-
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format: "apple",
-		AttStmt: map[string]any{
-			"x5c": []any{},
-		},
-	}
-
-	_, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Fatal("expected error for empty x5c")
-	}
-	if err.Error() != "x5c array cannot be empty" {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestVerify_InvalidCertificateBytes(t *testing.T) {
-	t.Parallel()
-
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format: "apple",
-		AttStmt: map[string]any{
-			"x5c": []any{"not bytes"},
-		},
-	}
-
-	_, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Fatal("expected error for invalid certificate bytes")
-	}
-	if err.Error() != "x5c[0] must be a byte slice" {
-		t.Errorf("unexpected error message: %v", err)
-	}
-}
-
-func TestVerify_NonceValidation(t *testing.T) {
+func TestVerify(t *testing.T) {
 	t.Parallel()
 
 	cert := parseCertFromPEM(testCertPEM)
 
-	verifier := New(slog.New(slog.DiscardHandler))
-	stmt := nanoca.AttestationStatement{
-		Format: "apple",
-		AttStmt: map[string]any{
-			"x5c": []any{cert.Raw},
+	tests := []struct {
+		name      string
+		stmt      nanoca.AttestationStatement
+		challenge []byte
+		wantErr   string
+	}{
+		{
+			name:      "FormatMismatch",
+			stmt:      nanoca.AttestationStatement{Format: "tpm", AttStmt: map[string]any{}},
+			challenge: []byte("challenge"),
+			wantErr:   "format mismatch: expected apple, got tpm",
+		},
+		{
+			name:      "MissingX5C",
+			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{}},
+			challenge: []byte("challenge"),
+			wantErr:   "apple attestation statement missing x5c field",
+		},
+		{
+			name:      "InvalidX5CType",
+			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": "not an array"}},
+			challenge: []byte("challenge"),
+			wantErr:   "x5c field must be an array",
+		},
+		{
+			name:      "EmptyX5C",
+			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{}}},
+			challenge: []byte("challenge"),
+			wantErr:   "x5c array cannot be empty",
+		},
+		{
+			name:      "InvalidCertificateBytes",
+			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{"not bytes"}}},
+			challenge: []byte("challenge"),
+			wantErr:   "x5c[0] must be a byte slice",
+		},
+		{
+			name:      "NonceValidation",
+			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{cert.Raw}}},
+			challenge: []byte("wrong challenge"),
+			wantErr:   "nonce verification failed: nonce value mismatch",
 		},
 	}
 
-	wrongChallenge := []byte("wrong challenge")
-	_, err := verifier.Verify(t.Context(), stmt, wrongChallenge)
-	if err == nil {
-		t.Fatal("expected error for nonce mismatch")
-	}
-	if err.Error() != "nonce verification failed: nonce value mismatch" {
-		t.Errorf("unexpected error message: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			verifier := New(slog.New(slog.DiscardHandler))
+			_, err := verifier.Verify(t.Context(), tt.stmt, tt.challenge)
+			if err == nil {
+				t.Fatalf("expected error %q, got nil", tt.wantErr)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("unexpected error message: got %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -63,10 +63,7 @@ func TestDeviceAttestationFlow(t *testing.T) {
 		Contact: []string{"mailto:test@example.com"},
 	}
 
-	_, err = client.Register(ctx, account, func(tosURL string) bool {
-		t.Logf("Terms of Service URL: %s", tosURL)
-		return true
-	})
+	_, err = client.Register(ctx, account, acme.AcceptTOS)
 	if err != nil {
 		t.Fatalf("Failed to create account: %v", err)
 	}
@@ -106,7 +103,6 @@ func TestDeviceAttestationFlow(t *testing.T) {
 	if deviceChallenge.Token == "" {
 		t.Error("Challenge token should not be empty")
 	}
-	t.Logf("Found device-attest-01 challenge: %s (token: %s)", deviceChallenge.URI, deviceChallenge.Token[:8]+"...")
 
 	_, err = client.GetOrder(ctx, order.URI)
 	if err != nil {
@@ -145,21 +141,13 @@ func TestDeviceAttestationFlow(t *testing.T) {
 		t.Fatalf("Failed to get updated challenge: %v", err)
 	}
 
-	switch challenge.Status {
-	case acme.StatusValid:
-		t.Log("Challenge validated successfully!")
-	case acme.StatusInvalid:
+	if challenge.Status == acme.StatusInvalid {
 		t.Fatalf("Challenge validation failed")
 	}
 
-	updatedAuthz, err := client.GetAuthorization(ctx, order.AuthzURLs[0])
+	_, err = client.GetAuthorization(ctx, order.AuthzURLs[0])
 	if err != nil {
 		t.Fatalf("Failed to get updated authorization: %v", err)
-	}
-
-	t.Logf("Authorization status: %s", updatedAuthz.Status)
-	if updatedAuthz.Status == acme.StatusValid {
-		t.Log("Authorization is now valid - ready for certificate issuance!")
 	}
 
 	retrievedOrder, err := client.GetOrder(ctx, order.URI)
@@ -185,23 +173,15 @@ func TestDeviceAttestationFlow(t *testing.T) {
 			t.Fatalf("Failed to create CSR: %v", err)
 		}
 
-		cert, certURL, err := client.CreateOrderCert(ctx, retrievedOrder.FinalizeURL, csrDER, true)
+		cert, _, err := client.CreateOrderCert(ctx, retrievedOrder.FinalizeURL, csrDER, true)
 		if err != nil {
 			t.Fatalf("Failed to finalize order: %v", err)
 		}
 
 		if len(cert) > 0 {
-			parsedCert, err := x509.ParseCertificate(cert[0])
-			if err != nil {
+			if _, err := x509.ParseCertificate(cert[0]); err != nil {
 				t.Fatalf("Failed to parse certificate: %v", err)
 			}
-
-			t.Logf("Certificate downloaded successfully:")
-			t.Logf("  Subject: %s", parsedCert.Subject.String())
-			t.Logf("  Serial Number: %s", parsedCert.SerialNumber.String())
-			t.Logf("  Valid From: %s", parsedCert.NotBefore.Format(time.RFC3339))
-			t.Logf("  Valid Until: %s", parsedCert.NotAfter.Format(time.RFC3339))
-			t.Logf("  Certificate URL: %s", certURL)
 
 			if len(cert) != 2 {
 				t.Fatalf("Expected exactly two certificates (leaf + intermediate, self-signed root omitted), got %d", len(cert))

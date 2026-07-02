@@ -48,14 +48,21 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestStorage_NonceOperations(t *testing.T) {
-	t.Parallel()
+func newTestStorage(t *testing.T) *Storage {
+	t.Helper()
 
 	storage, err := New(Options{InMemory: true})
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
-	defer storage.Close()
+	t.Cleanup(func() { storage.Close() })
+	return storage
+}
+
+func TestStorage_NonceOperations(t *testing.T) {
+	t.Parallel()
+
+	storage := newTestStorage(t)
 
 	ctx := t.Context()
 	nonce := &nanoca.Nonce{
@@ -63,7 +70,7 @@ func TestStorage_NonceOperations(t *testing.T) {
 		CreatedAt: time.Now(),
 	}
 
-	err = storage.CreateNonce(ctx, nonce)
+	err := storage.CreateNonce(ctx, nonce)
 	if err != nil {
 		t.Errorf("CreateNonce() error = %v", err)
 	}
@@ -102,11 +109,7 @@ func TestStorage_NonceOperations(t *testing.T) {
 func TestStorage_AccountOperations(t *testing.T) {
 	t.Parallel()
 
-	storage, err := New(Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer storage.Close()
+	storage := newTestStorage(t)
 
 	ctx := t.Context()
 	account := &nanoca.Account{
@@ -116,7 +119,7 @@ func TestStorage_AccountOperations(t *testing.T) {
 		KeyBytes: []byte("key-thumbprint-hash"),
 	}
 
-	err = storage.CreateAccount(ctx, account)
+	err := storage.CreateAccount(ctx, account)
 	if err != nil {
 		t.Errorf("CreateAccount() error = %v", err)
 	}
@@ -166,11 +169,7 @@ func TestStorage_AccountOperations(t *testing.T) {
 func TestStorage_OrderOperations(t *testing.T) {
 	t.Parallel()
 
-	storage, err := New(Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer storage.Close()
+	storage := newTestStorage(t)
 
 	ctx := t.Context()
 	expires := time.Now().Add(24 * time.Hour)
@@ -182,7 +181,7 @@ func TestStorage_OrderOperations(t *testing.T) {
 		Identifiers: []nanoca.Identifier{{Type: "permanent-identifier", Value: "device-123"}},
 	}
 
-	err = storage.CreateOrder(ctx, order)
+	err := storage.CreateOrder(ctx, order)
 	if err != nil {
 		t.Errorf("CreateOrder() error = %v", err)
 	}
@@ -235,11 +234,7 @@ func TestStorage_OrderOperations(t *testing.T) {
 func TestStorage_AuthorizationOperations(t *testing.T) {
 	t.Parallel()
 
-	storage, err := New(Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer storage.Close()
+	storage := newTestStorage(t)
 
 	ctx := t.Context()
 	authzExpires := time.Now().Add(24 * time.Hour)
@@ -250,7 +245,7 @@ func TestStorage_AuthorizationOperations(t *testing.T) {
 		Identifier: nanoca.Identifier{Type: "permanent-identifier", Value: "device-123"},
 	}
 
-	err = storage.CreateAuthorization(ctx, authz)
+	err := storage.CreateAuthorization(ctx, authz)
 	if err != nil {
 		t.Errorf("CreateAuthorization() error = %v", err)
 	}
@@ -295,11 +290,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 	t.Run("CreateAndGet", func(t *testing.T) {
 		t.Parallel()
 
-		storage, err := New(Options{InMemory: true})
-		if err != nil {
-			t.Fatalf("Failed to create storage: %v", err)
-		}
-		defer storage.Close()
+		storage := newTestStorage(t)
 
 		ctx := t.Context()
 		challenge := &nanoca.Challenge{
@@ -333,11 +324,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 	t.Run("SetChallengeProcessing", func(t *testing.T) {
 		t.Parallel()
 
-		storage, err := New(Options{InMemory: true})
-		if err != nil {
-			t.Fatalf("Failed to create storage: %v", err)
-		}
-		defer storage.Close()
+		storage := newTestStorage(t)
 
 		ctx := t.Context()
 		challenge := &nanoca.Challenge{
@@ -376,11 +363,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 	t.Run("SetChallengeValid", func(t *testing.T) {
 		t.Parallel()
 
-		storage, err := New(Options{InMemory: true})
-		if err != nil {
-			t.Fatalf("Failed to create storage: %v", err)
-		}
-		defer storage.Close()
+		storage := newTestStorage(t)
 
 		ctx := t.Context()
 		challenge := &nanoca.Challenge{
@@ -433,11 +416,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 	t.Run("SetChallengeInvalid", func(t *testing.T) {
 		t.Parallel()
 
-		storage, err := New(Options{InMemory: true})
-		if err != nil {
-			t.Fatalf("Failed to create storage: %v", err)
-		}
-		defer storage.Close()
+		storage := newTestStorage(t)
 
 		ctx := t.Context()
 		challenge := &nanoca.Challenge{
@@ -488,11 +467,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 func TestStorage_CertificateOperations(t *testing.T) {
 	t.Parallel()
 
-	storage, err := New(Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("Failed to create storage: %v", err)
-	}
-	defer storage.Close()
+	storage := newTestStorage(t)
 
 	ctx := t.Context()
 	cert := &nanoca.Certificate{
@@ -501,7 +476,7 @@ func TestStorage_CertificateOperations(t *testing.T) {
 		Certificate:  &x509.Certificate{},
 	}
 
-	err = storage.CreateCertificate(ctx, cert)
+	err := storage.CreateCertificate(ctx, cert)
 	if err != nil {
 		t.Errorf("CreateCertificate() error = %v", err)
 	}

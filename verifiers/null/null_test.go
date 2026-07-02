@@ -18,31 +18,45 @@ func TestAttestationVerifier(t *testing.T) {
 		t.Errorf("CreateNullDeviceAttestation() fmt = %v, want null", got["fmt"])
 	}
 
-	stmt := nanoca.AttestationStatement{
-		Format:  "null",
-		AttStmt: map[string]any{},
+	tests := []struct {
+		name    string
+		stmt    nanoca.AttestationStatement
+		wantErr bool
+	}{
+		{
+			name:    "valid null attestation",
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{}},
+			wantErr: false,
+		},
+		{
+			name:    "format mismatch",
+			stmt:    nanoca.AttestationStatement{Format: "android-key", AttStmt: map[string]any{}},
+			wantErr: true,
+		},
+		{
+			// attStmt content is ignored for the null format
+			name:    "non-empty attStmt",
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"key": "value"}},
+			wantErr: false,
+		},
 	}
 
-	deviceInfo, err := verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err != nil {
-		t.Fatalf("Verify() failed: %v", err)
-	}
-
-	if deviceInfo.PermanentIdentifier.Identifier != "null-attestation-device" {
-		t.Errorf("PermanentIdentifier.Identifier = %s, want null-attestation-device",
-			deviceInfo.PermanentIdentifier.Identifier)
-	}
-
-	stmt.Format = "android-key"
-	_, err = verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err == nil {
-		t.Error("Verify() should fail with format mismatch")
-	}
-
-	stmt.Format = "null"
-	stmt.AttStmt = map[string]any{"key": "value"}
-	_, err = verifier.Verify(t.Context(), stmt, []byte("challenge"))
-	if err != nil {
-		t.Errorf("Verify() should succeed with null attestation regardless of attStmt content: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			deviceInfo, err := verifier.Verify(t.Context(), tc.stmt, []byte("challenge"))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("Verify() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Verify() failed: %v", err)
+			}
+			if deviceInfo.PermanentIdentifier.Identifier != "null-attestation-device" {
+				t.Errorf("PermanentIdentifier.Identifier = %s, want null-attestation-device",
+					deviceInfo.PermanentIdentifier.Identifier)
+			}
+		})
 	}
 }

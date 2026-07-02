@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -85,7 +86,7 @@ func (j *jwtAssertionTokenSource) loadCachedToken() (*oauth2.Token, error) {
 		return nil, fmt.Errorf("failed to resolve cache directory: %w", err)
 	}
 	relPath, err := filepath.Rel(cleanCacheDir, cleanCachePath)
-	if err != nil || filepath.IsAbs(relPath) || len(relPath) >= 3 && relPath[:3] == ".."+string(filepath.Separator) {
+	if err != nil || filepath.IsAbs(relPath) || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid cache path: outside cache directory")
 	}
 
@@ -116,10 +117,11 @@ func (j *jwtAssertionTokenSource) saveCachedToken(token *oauth2.Token) error {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
+	now := time.Now()
 	cached := cachedToken{
 		Token:     token,
-		Created:   time.Now(),
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		Created:   now,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
 	}
 
 	data, err := json.Marshal(cached)

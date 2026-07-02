@@ -17,18 +17,24 @@ func (stubIssuer) IssueCertificate(_ *x509.CertificateRequest, _ []*nanoca.Devic
 	return nil, nil
 }
 
-func TestNewValidation(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.DiscardHandler)
-	issuer := stubIssuer{}
-	authz := nullauthorizer.New()
+func newTestStorage(t *testing.T) nanoca.Storage {
+	t.Helper()
 
 	storage, err := store.New(store.Options{InMemory: true})
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
 	}
 	t.Cleanup(func() { _ = storage.Close() })
+	return storage
+}
+
+func TestNewValidation(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.DiscardHandler)
+	issuer := stubIssuer{}
+	authz := nullauthorizer.New()
+	storage := newTestStorage(t)
 
 	tests := []struct {
 		name       string
@@ -60,11 +66,7 @@ func TestNewValidation(t *testing.T) {
 func TestNewWithPrefixNormalizesLeadingSlash(t *testing.T) {
 	t.Parallel()
 
-	storage, err := store.New(store.Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("failed to create storage: %v", err)
-	}
-	t.Cleanup(func() { _ = storage.Close() })
+	storage := newTestStorage(t)
 
 	ca, err := nanoca.New(
 		slog.New(slog.DiscardHandler),

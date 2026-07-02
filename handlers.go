@@ -354,21 +354,9 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 		ca.writeProblem(ctx, w, Malformed("Order ID required"))
 		return
 	}
-	ctx = WithOrderID(ctx, strings.TrimSuffix(orderID, "/finalize"))
-
-	if strings.HasSuffix(orderID, "/finalize") {
-		orderID = orderID[:len(orderID)-len("/finalize")]
-
-		postData, prob := ca.verifyPOST(r, ca.lookupJWK)
-		if prob != nil {
-			ca.writeProblem(ctx, w, prob)
-			return
-		}
-		ctx = WithAccountID(ctx, postData.accountID)
-
-		ca.handleOrderFinalize(ctx, w, orderID, postData.accountID, postData)
-		return
-	}
+	finalize := strings.HasSuffix(orderID, "/finalize")
+	orderID = strings.TrimSuffix(orderID, "/finalize")
+	ctx = WithOrderID(ctx, orderID)
 
 	postData, prob := ca.verifyPOST(r, ca.lookupJWK)
 	if prob != nil {
@@ -376,6 +364,11 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx = WithAccountID(ctx, postData.accountID)
+
+	if finalize {
+		ca.handleOrderFinalize(ctx, w, orderID, postData)
+		return
+	}
 
 	order, err := ca.storage.GetOrder(ctx, orderID)
 	if err != nil {
@@ -395,14 +388,14 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, orderID, accountID string, postData *authenticatedPOST) {
+func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, orderID string, postData *authenticatedPOST) {
 	var finalizeReq FinalizeRequest
 	if err := json.Unmarshal(postData.body, &finalizeReq); err != nil {
 		ca.writeProblem(ctx, w, Malformed("Invalid finalize request"))
 		return
 	}
 
-	if err := ca.finalizeCertificate(ctx, orderID, accountID, finalizeReq.CSR); err != nil {
+	if err := ca.finalizeCertificate(ctx, orderID, postData.accountID, finalizeReq.CSR); err != nil {
 		ca.writeProblem(ctx, w, Malformed("Failed to finalize certificate"))
 		return
 	}
@@ -413,9 +406,7 @@ func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, or
 		return
 	}
 
-	orderCopy := *order
-
-	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, &orderCopy)
+	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, order)
 }
 
 func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {

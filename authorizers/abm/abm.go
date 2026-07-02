@@ -45,8 +45,8 @@ func (a *ABMAuthorizer) Authorize(ctx context.Context, device *nanoca.DeviceInfo
 		return false, fmt.Errorf("failed to check device authorization with ABM: %w", err)
 	}
 
-	for _, device := range devices {
-		if device.SerialNumber == serialNumber {
+	for _, d := range devices {
+		if d.SerialNumber == serialNumber {
 			return true, nil
 		}
 	}
