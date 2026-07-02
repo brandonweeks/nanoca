@@ -1,6 +1,7 @@
 package inprocess
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
@@ -46,7 +47,7 @@ func New(signer crypto.Signer, issuerCert *x509.Certificate, rest ...*x509.Certi
 }
 
 // IssueCertificate creates a certificate from CSR and device information
-func (i *Issuer) IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+func (i *Issuer) IssueCertificate(_ context.Context, csr *x509.CertificateRequest, deviceInfos []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
 	now := time.Now()
 	template := &x509.Certificate{
 		Subject:               csr.Subject,

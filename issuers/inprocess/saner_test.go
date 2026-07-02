@@ -18,7 +18,7 @@ func TestIssueCertificateSANError(t *testing.T) {
 	}
 
 	bad := []*nanoca.DeviceInfo{{HardwareModule: &nanoca.HardwareModule{}}}
-	if _, err := issuer.IssueCertificate(newTestCSR(t, "device"), bad); err == nil {
+	if _, err := issuer.IssueCertificate(t.Context(), newTestCSR(t, "device"), bad); err == nil {
 		t.Error("IssueCertificate() error = nil, want SAN build error")
 	}
 }
