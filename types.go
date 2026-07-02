@@ -2,6 +2,7 @@ package nanoca
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/asn1"
 	"time"
@@ -220,5 +221,5 @@ type FinalizeRequest struct {
 
 type CertificateIssuer interface {
 	// The deviceInfos slice contains attestation-derived device information.
-	IssueCertificate(csr *x509.CertificateRequest, deviceInfos []*DeviceInfo) (*Certificate, error)
+	IssueCertificate(ctx context.Context, csr *x509.CertificateRequest, deviceInfos []*DeviceInfo) (*Certificate, error)
 }

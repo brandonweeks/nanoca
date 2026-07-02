@@ -1,6 +1,7 @@
 package nanoca_test
 
 import (
+	"context"
 	"crypto/x509"
 	"log/slog"
 	"testing"
@@ -13,7 +14,7 @@ import (
 
 type stubIssuer struct{}
 
-func (stubIssuer) IssueCertificate(_ *x509.CertificateRequest, _ []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+func (stubIssuer) IssueCertificate(_ context.Context, _ *x509.CertificateRequest, _ []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
 	return nil, nil
 }
 

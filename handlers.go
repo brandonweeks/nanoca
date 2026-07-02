@@ -987,7 +987,7 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 		}
 	}
 
-	cert, err := ca.certificateIssuer.IssueCertificate(csr, deviceInfos)
+	cert, err := ca.certificateIssuer.IssueCertificate(ctx, csr, deviceInfos)
 	if err != nil {
 		return fmt.Errorf("failed to issue certificate: %w", err)
 	}

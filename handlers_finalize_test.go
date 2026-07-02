@@ -18,7 +18,7 @@ import (
 
 type failingIssuer struct{}
 
-func (failingIssuer) IssueCertificate(*x509.CertificateRequest, []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+func (failingIssuer) IssueCertificate(context.Context, *x509.CertificateRequest, []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
 	return nil, errors.New("issuer unavailable")
 }
 

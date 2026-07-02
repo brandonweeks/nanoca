@@ -113,7 +113,7 @@ func TestIssuer_IssueCertificate(t *testing.T) {
 			t.Fatalf("New() error = %v", err)
 		}
 
-		cert, err := issuer.IssueCertificate(newTestCSR(t, "Test Device"), nil)
+		cert, err := issuer.IssueCertificate(t.Context(), newTestCSR(t, "Test Device"), nil)
 		if err != nil {
 			t.Fatalf("IssueCertificate() error = %v", err)
 		}
@@ -136,7 +136,7 @@ func TestIssuer_IssueCertificate(t *testing.T) {
 			t.Fatalf("New() error = %v", err)
 		}
 
-		cert, err := issuer.IssueCertificate(newTestCSR(t, "Test Device With Chain"), nil)
+		cert, err := issuer.IssueCertificate(t.Context(), newTestCSR(t, "Test Device With Chain"), nil)
 		if err != nil {
 			t.Fatalf("IssueCertificate() error = %v", err)
 		}
@@ -180,7 +180,7 @@ func TestIssuer_IssueCertificate(t *testing.T) {
 			t.Fatalf("New() error = %v", err)
 		}
 
-		cert, err := issuer.IssueCertificate(newTestCSR(t, "Test Device No Root"), nil)
+		cert, err := issuer.IssueCertificate(t.Context(), newTestCSR(t, "Test Device No Root"), nil)
 		if err != nil {
 			t.Fatalf("IssueCertificate() error = %v", err)
 		}
@@ -216,7 +216,7 @@ func TestIssuer_IssueCertificate(t *testing.T) {
 			},
 		}
 
-		cert, err := issuer.IssueCertificate(csr, deviceInfos)
+		cert, err := issuer.IssueCertificate(t.Context(), csr, deviceInfos)
 		if err != nil {
 			t.Fatalf("IssueCertificate() error = %v", err)
 		}
