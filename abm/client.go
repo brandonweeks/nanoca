@@ -37,7 +37,7 @@ func New(ctx context.Context, config *Config) (*Client, error) {
 
 // GetOrganizationDevices retrieves devices from the ABM organization
 func (c *Client) GetOrganizationDevices(ctx context.Context) ([]Device, error) {
-	requestURL := fmt.Sprintf("%s/orgDevices", baseURL)
+	requestURL := baseURL + "/orgDevices"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {

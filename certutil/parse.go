@@ -93,11 +93,11 @@ func ParsePermanentIdentifier(der []byte) (*nanoca.PermanentIdentifier, error) {
 	inner := seq.Bytes
 
 	if len(inner) > 0 {
-		// Peek at the next element to see if it's a UTF8String (identifier).
+		// The identifier is an optional leading UTF8String.
 		var raw asn1.RawValue
-		if _, err := asn1.Unmarshal(inner, &raw); err == nil && raw.Tag == asn1.TagUTF8String && raw.Class == asn1.ClassUniversal {
+		if rest, err := asn1.Unmarshal(inner, &raw); err == nil && raw.Tag == asn1.TagUTF8String && raw.Class == asn1.ClassUniversal {
 			pi.Identifier = string(raw.Bytes)
-			inner, _ = asn1.Unmarshal(inner, &raw)
+			inner = rest
 		}
 	}
 

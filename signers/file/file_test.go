@@ -10,8 +10,23 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func encodeKeyPEM(t *testing.T, key crypto.PrivateKey) []byte {
+	t.Helper()
+
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("Failed to marshal PKCS8 key: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: keyBytes,
+	})
+}
 
 func TestLoadSigner(t *testing.T) {
 	t.Parallel()
@@ -24,18 +39,9 @@ func TestLoadSigner(t *testing.T) {
 		t.Fatalf("Failed to generate test key: %v", err)
 	}
 
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(privKey)
-	if err != nil {
-		t.Fatalf("Failed to marshal test key: %v", err)
-	}
+	keyPEM := encodeKeyPEM(t, privKey)
 
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "PRIVATE KEY",
-		Bytes: keyBytes,
-	})
-
-	err = os.WriteFile(keyPath, keyPEM, 0o600)
-	if err != nil {
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		t.Fatalf("Failed to write test key file: %v", err)
 	}
 
@@ -64,23 +70,23 @@ func TestParseSigner_PKCS8PrivateKey(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		keyGen  func() (crypto.PrivateKey, error)
-		keyType string
+		name     string
+		keyGen   func() (crypto.PrivateKey, error)
+		wantType reflect.Type
 	}{
 		{
 			name: "RSA PKCS8",
 			keyGen: func() (crypto.PrivateKey, error) {
 				return rsa.GenerateKey(rand.Reader, 2048)
 			},
-			keyType: "*rsa.PrivateKey",
+			wantType: reflect.TypeFor[*rsa.PrivateKey](),
 		},
 		{
 			name: "ECDSA PKCS8",
 			keyGen: func() (crypto.PrivateKey, error) {
 				return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			},
-			keyType: "*ecdsa.PrivateKey",
+			wantType: reflect.TypeFor[*ecdsa.PrivateKey](),
 		},
 	}
 
@@ -93,17 +99,7 @@ func TestParseSigner_PKCS8PrivateKey(t *testing.T) {
 				t.Fatalf("Failed to generate key: %v", err)
 			}
 
-			keyBytes, err := x509.MarshalPKCS8PrivateKey(privKey)
-			if err != nil {
-				t.Fatalf("Failed to marshal PKCS8 key: %v", err)
-			}
-
-			keyPEM := pem.EncodeToMemory(&pem.Block{
-				Type:  "PRIVATE KEY",
-				Bytes: keyBytes,
-			})
-
-			signer, err := parseSigner(keyPEM)
+			signer, err := parseSigner(encodeKeyPEM(t, privKey))
 			if err != nil {
 				t.Errorf("parseSigner() error = %v", err)
 			}
@@ -111,15 +107,8 @@ func TestParseSigner_PKCS8PrivateKey(t *testing.T) {
 				t.Error("parseSigner() returned nil")
 			}
 
-			switch tt.keyType {
-			case "*rsa.PrivateKey":
-				if _, ok := signer.(*rsa.PrivateKey); !ok {
-					t.Errorf("parseSigner() returned wrong type: %T", signer)
-				}
-			case "*ecdsa.PrivateKey":
-				if _, ok := signer.(*ecdsa.PrivateKey); !ok {
-					t.Errorf("parseSigner() returned wrong type: %T", signer)
-				}
+			if got := reflect.TypeOf(signer); got != tt.wantType {
+				t.Errorf("parseSigner() returned wrong type: %T", signer)
 			}
 		})
 	}

@@ -32,23 +32,28 @@ func TestNotFoundErrors(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
 
-	getters := map[string]func() error{
-		"GetAccount":       func() error { _, err := s.GetAccount(ctx, "ghost"); return err },
-		"GetAccountByKey":  func() error { _, err := s.GetAccountByKey(ctx, "ghost"); return err },
-		"GetOrder":         func() error { _, err := s.GetOrder(ctx, "ghost"); return err },
-		"GetAuthorization": func() error { _, err := s.GetAuthorization(ctx, "ghost"); return err },
-		"GetChallenge":     func() error { _, err := s.GetChallenge(ctx, "ghost"); return err },
-		"GetCertificate":   func() error { _, err := s.GetCertificate(ctx, "ghost"); return err },
-		"UpdateAccount":    func() error { return s.UpdateAccount(ctx, &nanoca.Account{ID: "ghost"}) },
-		"UpdateOrder":      func() error { return s.UpdateOrder(ctx, &nanoca.Order{ID: "ghost"}) },
-		"UpdateAuthz":      func() error { return s.UpdateAuthorization(ctx, &nanoca.Authorization{ID: "ghost"}) },
-		"SetProcessing":    func() error { return s.SetChallengeProcessing(ctx, "ghost") },
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"GetAccount", func() error { _, err := s.GetAccount(ctx, "ghost"); return err }},
+		{"GetAccountByKey", func() error { _, err := s.GetAccountByKey(ctx, "ghost"); return err }},
+		{"GetOrder", func() error { _, err := s.GetOrder(ctx, "ghost"); return err }},
+		{"GetAuthorization", func() error { _, err := s.GetAuthorization(ctx, "ghost"); return err }},
+		{"GetChallenge", func() error { _, err := s.GetChallenge(ctx, "ghost"); return err }},
+		{"GetCertificate", func() error { _, err := s.GetCertificate(ctx, "ghost"); return err }},
+		{"UpdateAccount", func() error { return s.UpdateAccount(ctx, &nanoca.Account{ID: "ghost"}) }},
+		{"UpdateOrder", func() error { return s.UpdateOrder(ctx, &nanoca.Order{ID: "ghost"}) }},
+		{"UpdateAuthz", func() error { return s.UpdateAuthorization(ctx, &nanoca.Authorization{ID: "ghost"}) }},
+		{"SetProcessing", func() error { return s.SetChallengeProcessing(ctx, "ghost") }},
 	}
 
-	for name, fn := range getters {
-		if err := fn(); err == nil {
-			t.Errorf("%s(missing) error = nil, want not-found error", name)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.fn(); err == nil {
+				t.Errorf("%s(missing) error = nil, want not-found error", tt.name)
+			}
+		})
 	}
 }
 

@@ -87,11 +87,9 @@ func (a *AttestationVerifier) Verify(ctx context.Context, stmt nanoca.Attestatio
 		Bytes: credCert.Raw,
 	})))
 
-	hasher := sha256.New()
-	hasher.Write(challenge)
-	expectedNonce := hasher.Sum(nil)
+	expectedNonce := sha256.Sum256(challenge)
 
-	if err := a.verifyNonceExtension(credCert, expectedNonce); err != nil {
+	if err := a.verifyNonceExtension(credCert, expectedNonce[:]); err != nil {
 		return nil, fmt.Errorf("nonce verification failed: %w", err)
 	}
 
@@ -99,8 +97,7 @@ func (a *AttestationVerifier) Verify(ctx context.Context, stmt nanoca.Attestatio
 		return nil, fmt.Errorf("certificate chain verification failed: %w", err)
 	}
 
-	deviceInfo := a.extractDeviceInfo(credCert)
-	return deviceInfo, nil
+	return a.extractDeviceInfo(credCert), nil
 }
 
 func (a *AttestationVerifier) verifyNonceExtension(cert *x509.Certificate, expectedNonce []byte) error {
@@ -149,9 +146,7 @@ func (a *AttestationVerifier) extractDeviceInfo(cert *x509.Certificate) *nanoca.
 		}
 	}
 
-	deviceInfo := newDeviceInfo(serialNumber, udid)
-
-	return deviceInfo
+	return newDeviceInfo(serialNumber, udid)
 }
 
 func newDeviceInfo(serialNumber, udid string) *nanoca.DeviceInfo {

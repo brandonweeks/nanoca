@@ -25,11 +25,6 @@ func (n *AttestationVerifier) Verify(_ context.Context, stmt nanoca.AttestationS
 		return nil, fmt.Errorf("format mismatch: expected null, got %s", stmt.Format)
 	}
 
-	// For null attestation, the attStmt should be empty or only contain empty fields
-	// We allow an empty map as per the CreateNullDeviceAttestation format
-
-	// For null attestation, create basic device info without any specific device identifiers.
-	// RFC 4043: when Assigner is absent, the certificate issuer is the assigner.
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{
 			Identifier: "null-attestation-device",

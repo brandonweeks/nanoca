@@ -45,7 +45,6 @@ func WithVerifier(v AttestationVerifier) Option {
 
 func WithPrefix(prefix string) Option {
 	return func(ca *CA) {
-		// Ensure prefix starts with '/' if non-empty
 		if prefix != "" && !strings.HasPrefix(prefix, "/") {
 			prefix = "/" + prefix
 		}
@@ -80,8 +79,7 @@ func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, s
 		authorizer:        authorizer,
 		storage:           storage,
 		baseURL:           baseURL,
-		nonceExpiry:       1 * time.Hour, // default
-		observers:         make([]IssuanceObserver, 0),
+		nonceExpiry:       time.Hour,
 		verifiers:         make(map[string]AttestationVerifier),
 	}
 

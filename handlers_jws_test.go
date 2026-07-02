@@ -14,6 +14,24 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
+func encodeJWS(t *testing.T, protected map[string]any) string {
+	t.Helper()
+
+	protBytes, err := json.Marshal(protected)
+	if err != nil {
+		t.Fatalf("failed to marshal protected header: %v", err)
+	}
+	body, err := json.Marshal(map[string]string{
+		"protected": base64.RawURLEncoding.EncodeToString(protBytes),
+		"payload":   "e30", // {}
+		"signature": "AAAA",
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal JWS: %v", err)
+	}
+	return string(body)
+}
+
 func craftedJWS(t *testing.T, extra map[string]any) string {
 	t.Helper()
 
@@ -28,38 +46,13 @@ func craftedJWS(t *testing.T, extra map[string]any) string {
 
 	protected := map[string]any{"alg": "ES256", "jwk": json.RawMessage(jwkJSON)}
 	maps.Copy(protected, extra)
-	protBytes, err := json.Marshal(protected)
-	if err != nil {
-		t.Fatalf("failed to marshal protected header: %v", err)
-	}
-
-	body, err := json.Marshal(map[string]string{
-		"protected": base64.RawURLEncoding.EncodeToString(protBytes),
-		"payload":   "e30", // {}
-		"signature": "AAAA",
-	})
-	if err != nil {
-		t.Fatalf("failed to marshal JWS: %v", err)
-	}
-	return string(body)
+	return encodeJWS(t, protected)
 }
 
 func craftedJWSKid(t *testing.T, kid string) string {
 	t.Helper()
 
-	protBytes, err := json.Marshal(map[string]any{"alg": "ES256", "kid": kid})
-	if err != nil {
-		t.Fatalf("failed to marshal protected header: %v", err)
-	}
-	body, err := json.Marshal(map[string]string{
-		"protected": base64.RawURLEncoding.EncodeToString(protBytes),
-		"payload":   "e30",
-		"signature": "AAAA",
-	})
-	if err != nil {
-		t.Fatalf("failed to marshal JWS: %v", err)
-	}
-	return string(body)
+	return encodeJWS(t, map[string]any{"alg": "ES256", "kid": kid})
 }
 
 func fetchNonce(t *testing.T, client *http.Client, ts string) string {

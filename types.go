@@ -21,7 +21,6 @@ type AttestationStatement struct {
 // PermanentIdentifier contains device serial numbers or similar persistent identifiers.
 // HardwareModule contains hardware-specific identifiers like UDIDs or TPM data.
 type DeviceInfo struct {
-	// ACME draft specification identifiers - these map to ACME identifier types
 	PermanentIdentifier *PermanentIdentifier
 	HardwareModule      *HardwareModule
 }

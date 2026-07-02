@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
+	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 )
@@ -27,21 +27,8 @@ func getSupportedAlgorithmStrings() []string {
 }
 
 func isMACalgorithm(alg string) bool {
-	// List of known MAC/HMAC algorithms from JOSE registry
-	macAlgorithms := []string{
-		"HS256", "HS384", "HS512", // HMAC using SHA-2
-		"HS256K", "HS384K", "HS512K", // HMAC using SHA-3
-	}
-
-	if slices.Contains(macAlgorithms, alg) {
-		return true
-	}
-
-	if len(alg) >= 2 && alg[:2] == "HS" {
-		return true
-	}
-
-	return false
+	// JOSE MAC algorithms (HS256, HS384, HS512, ...) all use the "HS" prefix.
+	return strings.HasPrefix(alg, "HS")
 }
 
 func (ca *CA) parseJWS(body string) (*jose.JSONWebSignature, error) {

@@ -1,8 +1,6 @@
 package abm
 
-import (
-	"crypto"
-)
+import "crypto"
 
 // Apple Business Manager API constants
 const (
@@ -17,14 +15,14 @@ type Device struct {
 	Model        string `json:"deviceModel"`
 }
 
-// deviceData represents the JSON:API data wrapper for a device (internal use)
+// deviceData represents the JSON:API data wrapper for a device
 type deviceData struct {
 	Type       string `json:"type"`
 	ID         string `json:"id"`
 	Attributes Device `json:"attributes"`
 }
 
-// devicesResponse represents the JSON:API response from the Get Organization Devices endpoint (internal use)
+// devicesResponse represents the JSON:API response from the Get Organization Devices endpoint
 type devicesResponse struct {
 	Data []deviceData `json:"data"`
 }
