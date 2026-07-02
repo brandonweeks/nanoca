@@ -135,8 +135,8 @@ func putAccount(txn *badger.Txn, account *nanoca.Account) error {
 		return err
 	}
 
-	if len(account.KeyBytes) > 0 {
-		return txn.Set(accountKeyLookupKey(string(account.KeyBytes)), []byte(account.ID))
+	if account.KeyThumbprint != "" {
+		return txn.Set(accountKeyLookupKey(account.KeyThumbprint), []byte(account.ID))
 	}
 
 	return nil

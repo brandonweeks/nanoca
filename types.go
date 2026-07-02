@@ -109,9 +109,9 @@ type Nonce struct {
 }
 
 type Account struct {
-	ID                   string           `json:"id"`                 // Include in storage
-	Key                  *jose.JSONWebKey `json:"key,omitempty"`      // Include in storage
-	KeyBytes             []byte           `json:"keyBytes,omitempty"` // Include in storage
+	ID                   string           `json:"id"`                      // Include in storage
+	Key                  *jose.JSONWebKey `json:"key,omitempty"`           // Include in storage
+	KeyThumbprint        string           `json:"keyThumbprint,omitempty"` // Include in storage
 	Status               string           `json:"status"`
 	Contact              []string         `json:"contact,omitempty"`
 	TermsOfServiceAgreed bool             `json:"termsOfServiceAgreed,omitempty"`
