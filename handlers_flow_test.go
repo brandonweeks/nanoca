@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"testing"
 
@@ -159,8 +160,10 @@ func TestDuplicateRegistrationReturnsExisting(t *testing.T) {
 	if _, err := newClient().Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
-	if _, err := newClient().Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
-		t.Fatalf("second register failed: %v", err)
+	// x/crypto/acme returns ErrAccountAlreadyExists on a 200 from newAccount;
+	// a nil error means the server minted a duplicate account (201).
+	if _, err := newClient().Register(t.Context(), &acme.Account{}, acme.AcceptTOS); !errors.Is(err, acme.ErrAccountAlreadyExists) {
+		t.Fatalf("second register error = %v, want ErrAccountAlreadyExists", err)
 	}
 }
 

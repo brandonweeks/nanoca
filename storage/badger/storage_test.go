@@ -113,10 +113,10 @@ func TestStorage_AccountOperations(t *testing.T) {
 
 	ctx := t.Context()
 	account := &nanoca.Account{
-		ID:       "test-account-123",
-		Contact:  []string{"mailto:test@example.com"},
-		Status:   "valid",
-		KeyBytes: []byte("key-thumbprint-hash"),
+		ID:            "test-account-123",
+		Contact:       []string{"mailto:test@example.com"},
+		Status:        "valid",
+		KeyThumbprint: "key-thumbprint-hash",
 	}
 
 	err := storage.CreateAccount(ctx, account)
@@ -132,7 +132,7 @@ func TestStorage_AccountOperations(t *testing.T) {
 		t.Errorf("GetAccount() ID = %v, want %v", retrieved.ID, account.ID)
 	}
 
-	retrieved, err = storage.GetAccountByKey(ctx, string(account.KeyBytes))
+	retrieved, err = storage.GetAccountByKey(ctx, account.KeyThumbprint)
 	if err != nil {
 		t.Errorf("GetAccountByKey() error = %v", err)
 	}

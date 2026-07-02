@@ -159,16 +159,10 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 	accountID := ca.generateAccountID()
 	ctx = WithAccountID(ctx, accountID)
 
-	jwkBytes, err := json.Marshal(postData.jwk)
-	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to serialize account key"))
-		return
-	}
-
 	account := &Account{
 		ID:                   accountID,
 		Key:                  postData.jwk,
-		KeyBytes:             jwkBytes, // Store the actual JWK JSON data
+		KeyThumbprint:        keyHash,
 		Status:               "valid",
 		Contact:              accountReq.Contact,
 		TermsOfServiceAgreed: accountReq.TermsOfServiceAgreed,
@@ -644,7 +638,7 @@ func (ca *CA) computeJWKHash(jwk *jose.JSONWebKey) (string, error) {
 		return "", fmt.Errorf("failed to compute JWK thumbprint: %w", err)
 	}
 
-	return string(thumbprint), nil
+	return base64.RawURLEncoding.EncodeToString(thumbprint), nil
 }
 
 func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderRequest) (*Order, error) {
