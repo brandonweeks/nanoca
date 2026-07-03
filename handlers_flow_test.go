@@ -233,3 +233,36 @@ func TestOrderBelongsToAnotherAccount(t *testing.T) {
 		t.Error("GetOrder() by other account error = nil, want error")
 	}
 }
+
+// createOrder builds challenges only for permanent-identifier and
+// hardware-module identifiers, so any other type yields an authorization
+// with zero challenges — an authorization that must never settle valid and
+// an order that must never be promoted, since nothing was ever validated.
+func TestZeroChallengeAuthorizationNotSettledValid(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+	client := newACMEClient(t, ts)
+
+	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{{Type: "dns", Value: "device.example"}})
+	if err != nil {
+		// Rejecting the identifier at new-order is also correct.
+		return
+	}
+
+	authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
+	if err != nil {
+		t.Fatalf("GetAuthorization() error = %v", err)
+	}
+	if authz.Status == acme.StatusValid {
+		t.Errorf("authorization with no challenges polled as %q, want never valid", authz.Status)
+	}
+
+	polled, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if polled.Status == acme.StatusReady || polled.Status == acme.StatusValid {
+		t.Errorf("order status = %q, want not promoted without any validation", polled.Status)
+	}
+}
