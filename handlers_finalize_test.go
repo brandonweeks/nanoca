@@ -27,6 +27,18 @@ func (failingIssuer) IssueCertificate(context.Context, *x509.CertificateRequest,
 	return nil, errors.New("issuer unavailable")
 }
 
+type policyRejectingIssuer struct{}
+
+func (policyRejectingIssuer) IssueCertificate(context.Context, *x509.CertificateRequest, []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+	return nil, nanoca.BadCSR("Unacceptable key type")
+}
+
+type deauthorizingIssuer struct{}
+
+func (deauthorizingIssuer) IssueCertificate(context.Context, *x509.CertificateRequest, []*nanoca.DeviceInfo) (*nanoca.Certificate, error) {
+	return nil, nanoca.Unauthorized("Device is not authorized")
+}
+
 type failingObserver struct{}
 
 func (failingObserver) OnIssuance(context.Context, *nanoca.IssuanceEvent) error {
@@ -56,14 +68,78 @@ func driveToReady(t *testing.T, ts *httptest.Server) (*acme.Client, *acme.Order)
 	return client, order
 }
 
+// A plain error from the issuer is transient: serverInternal to the
+// client, order back to ready so a retry can finalize.
 func TestFinalizeIssuerError(t *testing.T) {
 	t.Parallel()
 
 	ts, _ := newTestServer(t, testServerConfig{issuer: failingIssuer{}})
 
 	client, order := driveToReady(t, ts)
-	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
-		t.Error("CreateOrderCert() error = nil, want issuer failure")
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+	wantServerInternal(t, err)
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusReady {
+		t.Errorf("order status = %q, want %q", got.Status, acme.StatusReady)
+	}
+}
+
+// A *Problem from the issuer is the client-facing response: badCSR is a
+// policy verdict on the CSR alone, so the order stays ready for an
+// amended one.
+func TestFinalizeIssuerPolicyRejection(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{issuer: policyRejectingIssuer{}})
+
+	client, order := driveToReady(t, ts)
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:badCSR" {
+		t.Errorf("problem type = %q, want badCSR", ae.ProblemType)
+	}
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusReady {
+		t.Errorf("order status = %q, want %q", got.Status, acme.StatusReady)
+	}
+}
+
+// Any other sub-500 problem from the issuer is terminal: the order moves
+// to invalid per RFC 8555 Section 7.1.6 and the client abandons it.
+func TestFinalizeIssuerTerminalRejection(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{issuer: deauthorizingIssuer{}})
+
+	client, order := driveToReady(t, ts)
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:unauthorized" {
+		t.Errorf("problem type = %q, want unauthorized", ae.ProblemType)
+	}
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusInvalid {
+		t.Errorf("order status = %q, want %q", got.Status, acme.StatusInvalid)
 	}
 }
 
