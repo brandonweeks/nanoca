@@ -928,6 +928,10 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
 		ca.updateAuthorizationStatus(ctx, authz)
+	} else {
+		// The challenge is already valid, so nothing re-runs this refresh;
+		// the authorization stays pending until the client polls it.
+		ca.logger.ErrorContext(ctx, "Failed to get authorization after challenge validation", "error", err)
 	}
 
 	challenge, err = ca.storage.GetChallenge(ctx, challenge.ID)
@@ -963,6 +967,8 @@ func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challeng
 
 	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
 		ca.updateAuthorizationStatus(ctx, authz)
+	} else {
+		ca.logger.ErrorContext(ctx, "Failed to get authorization after challenge failure", "error", err)
 	}
 	ca.writeProblem(ctx, w, prob)
 }
