@@ -1095,11 +1095,11 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 	}
 }
 
-func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string, csrB64 string) (*Order, error) {
-	// Decode base64url-encoded CSR DER
-	// RFC 8555 Section 7.4: "csr (required, string): A CSR encoding the parameters for the
-	// certificate being requested [RFC2986]. The CSR is sent in the
-	// base64url-encoded version of the DER format."
+// parseFinalizeCSR decodes and validates the CSR from a finalize request.
+// RFC 8555 Section 7.4: "csr (required, string): A CSR encoding the parameters for the
+// certificate being requested [RFC2986]. The CSR is sent in the
+// base64url-encoded version of the DER format."
+func parseFinalizeCSR(csrB64 string) (*x509.CertificateRequest, error) {
 	csrDER, err := base64.RawURLEncoding.DecodeString(csrB64)
 	if err != nil {
 		return nil, BadCSR("Invalid CSR base64url encoding")
@@ -1114,6 +1114,10 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 		return nil, BadCSR(fmt.Sprintf("CSR signature verification failed: %s", err.Error()))
 	}
 
+	return csr, nil
+}
+
+func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string, csrB64 string) (*Order, error) {
 	// Existence and ownership are settled before the reservation is taken,
 	// so a request that has no claim on the order can never hold its lock.
 	order, err := ca.storage.GetOrder(ctx, orderID)
@@ -1141,6 +1145,14 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 			return nil, lookupProblem(err, "Order")
 		}
 		return nil, fmt.Errorf("failed to reserve order for finalization: %w", err)
+	}
+
+	// RFC 8555 Section 7.4 conditions the orderNotReady error only on order
+	// state, so the CSR is judged after the reserve has settled state and
+	// ownership; a rejected CSR then releases the reservation back to ready.
+	csr, err := parseFinalizeCSR(csrB64)
+	if err != nil {
+		return nil, ca.failOrder(ctx, orderID, token, err)
 	}
 
 	cert, deviceInfos, err := ca.issueForOrder(ctx, order, csr, token)
@@ -1230,11 +1242,13 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 // failOrder releases the finalize reservation, distinguishing terminal
 // failures from transient ones. A client-fault problem can only recur on
 // retry, so the order moves to invalid per RFC 8555 Section 7.1.6 and the
-// client abandons it; anything else returns the order to ready so a retry
-// can finalize again.
+// client abandons it. badCSR is the exception: only the CSR is at fault,
+// and Section 7.4 has the order stay ready so an amended CSR can finalize
+// it. Anything else returns the order to ready so a retry can finalize
+// again.
 func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) error {
 	to := OrderStatusReady
-	if prob, ok := errors.AsType[*Problem](err); ok && prob.Status < http.StatusInternalServerError {
+	if prob, ok := errors.AsType[*Problem](err); ok && prob.Status < http.StatusInternalServerError && prob.Type != badCSRErr {
 		to = OrderStatusInvalid
 	}
 	switch serr := ca.storage.ReleaseOrderFinalize(ctx, orderID, token, to); {

@@ -117,6 +117,73 @@ func TestFinalizeObserverErrorStillIssues(t *testing.T) {
 	}
 }
 
+// RFC 8555 Section 7.4 conditions the orderNotReady MUST only on order
+// state, so it takes precedence over CSR validation: a client whose CSR is
+// also broken must still learn the order isn't ready, not get a terminal
+// badCSR for an order that may yet become finalizable.
+func TestFinalizeNotReadyBadCSR(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+
+	client := newACMEClient(t, ts)
+	order, _ := pendingChallenge(t, client, "pending-bad-csr-device")
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a csr"), true)
+
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:orderNotReady" {
+		t.Errorf("problem type = %q, want orderNotReady", ae.ProblemType)
+	}
+}
+
+// Ownership is judged before the CSR: a foreign account probing another
+// account's finalize URL gets unauthorized, not CSR-validation feedback.
+func TestFinalizeForeignOrder(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+
+	owner := newACMEClient(t, ts)
+	order, _ := pendingChallenge(t, owner, "owned-finalize-device")
+
+	other := newACMEClient(t, ts)
+	_, _, err := other.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a csr"), true)
+
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:unauthorized" {
+		t.Errorf("problem type = %q, want unauthorized", ae.ProblemType)
+	}
+}
+
+// RFC 8555 Section 7.4: after badCSR the order SHOULD stay in "ready" so
+// the client can submit a new finalize request with an amended CSR.
+func TestFinalizeBadCSRLeavesOrderReady(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{})
+
+	client, order := driveToReady(t, ts)
+
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a csr"), true)
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:badCSR" {
+		t.Errorf("problem type = %q, want badCSR", ae.ProblemType)
+	}
+
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err != nil {
+		t.Fatalf("CreateOrderCert() with amended CSR error = %v, want success", err)
+	}
+}
+
 // RFC 8555 Section 7.4: finalizing an order that is not ready MUST return
 // 403 orderNotReady, which clients treat as retriable; malformed is terminal.
 func TestFinalizeNotReady(t *testing.T) {

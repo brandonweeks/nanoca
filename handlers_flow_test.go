@@ -227,22 +227,6 @@ func TestNotFoundLookups(t *testing.T) {
 	}
 }
 
-func TestFinalizeBadCSR(t *testing.T) {
-	t.Parallel()
-
-	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
-	client := newACMEClient(t, ts)
-
-	order, chal := pendingChallenge(t, client, "finalize-device")
-	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
-		t.Fatalf("failed to accept challenge: %v", err)
-	}
-
-	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a valid csr"), true); err == nil {
-		t.Error("CreateOrderCert() error = nil, want error")
-	}
-}
-
 func TestOrderBelongsToAnotherAccount(t *testing.T) {
 	t.Parallel()
 
