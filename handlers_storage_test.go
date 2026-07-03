@@ -236,6 +236,12 @@ func TestNewAccountCreateRace(t *testing.T) {
 	if !errors.Is(err, acme.ErrAccountAlreadyExists) {
 		t.Fatalf("Register() error = %v, want ErrAccountAlreadyExists", err)
 	}
+	// The client adopts the Location header as its kid, so a response
+	// carrying the loser's account would leave it signing with a kid the
+	// server cannot resolve.
+	if !strings.HasSuffix(string(client.KID), "/account/concurrent-winner") {
+		t.Errorf("client KID = %q, want the winning account's URL", client.KID)
+	}
 }
 
 // A storage failure while loading the order during finalize must surface as
