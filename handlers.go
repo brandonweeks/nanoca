@@ -982,7 +982,8 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 		return
 	}
 
-	allValid := true
+	// An order with no authorizations must not count as valid.
+	allValid := len(order.Authorizations) > 0
 	anyInvalid := false
 
 	for _, authzURL := range order.Authorizations {
