@@ -74,6 +74,11 @@ func TestConsumeNonceErrors(t *testing.T) {
 	if _, err := s.ConsumeNonce(ctx, "n1", -time.Second); !errors.Is(err, nanoca.ErrNonceExpired) {
 		t.Errorf("ConsumeNonce(expired) error = %v, want ErrNonceExpired", err)
 	}
+	// Consuming an expired nonce must still remove it, or expired nonces
+	// accumulate forever (nonce keys carry no TTL).
+	if _, err := s.ConsumeNonce(ctx, "n1", -time.Second); !errors.Is(err, nanoca.ErrNonceNotFound) {
+		t.Errorf("ConsumeNonce(expired, again) error = %v, want ErrNonceNotFound", err)
+	}
 }
 
 func TestChallengeStatusMismatch(t *testing.T) {
