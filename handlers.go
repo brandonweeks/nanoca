@@ -34,30 +34,21 @@ type authenticatedPOST struct {
 // or by looking it up in a database based on the input.
 type keyExtractor func(*http.Request, *jose.JSONWebSignature) (*jose.JSONWebKey, *Problem)
 
-var (
-	ErrNonceNotFound = errors.New("nonce not found")
-	ErrNonceExpired  = errors.New("nonce expired")
-)
-
-type NonceValidationError struct {
-	Err error
+// lookupProblem maps a storage lookup failure to a client-facing problem: a
+// missing object is the client's error, anything else is the server's.
+func lookupProblem(err error, resource string) *Problem {
+	if errors.Is(err, ErrNotFound) {
+		return Malformed(resource + " not found")
+	}
+	return InternalServerError("Failed to get " + strings.ToLower(resource))
 }
 
-func (e *NonceValidationError) Error() string {
-	return fmt.Sprintf("nonce validation failed: %v", e.Err)
-}
-
-func (e *NonceValidationError) Unwrap() error {
-	return e.Err
-}
-
-func (e *NonceValidationError) Is(target error) bool {
-	return errors.Is(e.Err, target)
-}
-
-func isNonceError(err error) bool {
-	var nonceValidationErr *NonceValidationError
-	return errors.As(err, &nonceValidationErr)
+// isFenceRejection reports whether a guarded or fenced storage write was
+// rejected because another request has settled the record; the winner's
+// result stands. Missing either sentinel would misread a lost race as a
+// backend failure.
+func isFenceRejection(err error) bool {
+	return errors.Is(err, ErrReserved) || errors.Is(err, ErrStatusMismatch)
 }
 
 func (ca *CA) handleDirectory(w http.ResponseWriter, r *http.Request) {
@@ -130,25 +121,19 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	keyHash, err := ca.computeJWKHash(postData.jwk)
+	keyThumbprint, err := jwkThumbprint(postData.jwk)
 	if err != nil {
 		ca.writeProblem(ctx, w, InternalServerError("Failed to process key"))
 		return
 	}
 
-	existingAccount, err := ca.storage.GetAccountByKey(ctx, keyHash)
+	existingAccount, err := ca.storage.GetAccountByKey(ctx, keyThumbprint)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		ca.writeProblem(ctx, w, InternalServerError("Failed to look up account"))
+		return
+	}
 	if err == nil {
-		ctx = WithAccountID(ctx, existingAccount.ID)
-		if existingAccount.Orders == "" {
-			existingAccount.Orders = ca.url(fmt.Sprintf("/account/%s/orders", existingAccount.ID))
-			if err := ca.storage.UpdateAccount(ctx, existingAccount); err != nil {
-				ca.logger.ErrorContext(ctx, "Failed to update account orders URL", "error", err)
-			}
-		}
-
-		accountURL := ca.url(fmt.Sprintf("/account/%s", existingAccount.ID))
-		w.Header().Set("Location", accountURL)
-		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, existingAccount)
+		ca.writeExistingAccount(ctx, w, existingAccount)
 		return
 	}
 
@@ -163,7 +148,7 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 	account := &Account{
 		ID:                   accountID,
 		Key:                  postData.jwk,
-		KeyThumbprint:        keyHash,
+		KeyThumbprint:        keyThumbprint,
 		Status:               "valid",
 		Contact:              accountReq.Contact,
 		TermsOfServiceAgreed: accountReq.TermsOfServiceAgreed,
@@ -172,6 +157,13 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ca.storage.CreateAccount(ctx, account); err != nil {
+		// Lost a race with a concurrent registration; return the winner.
+		if errors.Is(err, ErrAccountExists) {
+			if existing, err := ca.storage.GetAccountByKey(ctx, keyThumbprint); err == nil {
+				ca.writeExistingAccount(ctx, w, existing)
+				return
+			}
+		}
 		ca.writeProblem(ctx, w, InternalServerError("Failed to create account"))
 		return
 	}
@@ -181,6 +173,21 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 	accountURL := ca.url(fmt.Sprintf("/account/%s", accountID))
 	w.Header().Set("Location", accountURL)
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusCreated, account)
+}
+
+// RFC 8555 Section 7.3: an already-registered key gets a 200 with the
+// existing account URL in Location, rather than a 201.
+func (ca *CA) writeExistingAccount(ctx context.Context, w http.ResponseWriter, account *Account) {
+	ctx = WithAccountID(ctx, account.ID)
+	if account.Orders == "" {
+		account.Orders = ca.url(fmt.Sprintf("/account/%s/orders", account.ID))
+		if err := ca.storage.UpdateAccount(ctx, account); err != nil {
+			ca.logger.ErrorContext(ctx, "Failed to update account orders URL", "error", err)
+		}
+	}
+
+	w.Header().Set("Location", ca.url(fmt.Sprintf("/account/%s", account.ID)))
+	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, account)
 }
 
 func (ca *CA) extractJWK(_ *http.Request, jws *jose.JSONWebSignature) (*jose.JSONWebKey, *Problem) {
@@ -219,7 +226,10 @@ func (ca *CA) lookupJWK(r *http.Request, jws *jose.JSONWebSignature) (*jose.JSON
 	account, err := ca.getAccount(ctx, accountID)
 	if err != nil {
 		ca.logger.DebugContext(ctx, "Account lookup failed", "account_id", accountID, "error", err)
-		return nil, AccountDoesNotExist("Account not found")
+		if errors.Is(err, ErrNotFound) {
+			return nil, AccountDoesNotExist("Account not found")
+		}
+		return nil, InternalServerError("Failed to look up account")
 	}
 
 	if account.Key == nil {
@@ -290,8 +300,8 @@ func (ca *CA) verifyPOST(r *http.Request, kx keyExtractor) (*authenticatedPOST, 
 
 	result, err := ca.verifyJWSWithKey(jws, pubKey, r)
 	if err != nil {
-		if isNonceError(err) {
-			return nil, BadNonce(err.Error())
+		if prob, ok := errors.AsType[*Problem](err); ok {
+			return nil, prob
 		}
 		return nil, Malformed(fmt.Sprintf("JWS verification failed: %v", err))
 	}
@@ -377,13 +387,31 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 
 	order, err := ca.storage.GetOrder(ctx, orderID)
 	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Order not found"))
+		ca.writeProblem(ctx, w, lookupProblem(err, "Order"))
 		return
 	}
 
 	if order.AccountID != postData.accountID {
 		ca.writeProblem(ctx, w, Unauthorized("Order does not belong to account"))
 		return
+	}
+
+	// A settled authorization whose pending-to-ready promotion failed has
+	// nothing left to retry it — re-POSTs of the valid challenge
+	// short-circuit and updateAuthorizationStatus returns early on final
+	// states — so recompute on poll; the guarded transition keeps this
+	// from overwriting a status another request has since written.
+	if order.Status == OrderStatusPending {
+		ca.updateOrderStatus(ctx, order)
+	}
+
+	// A crash mid-finalize leaves the order processing in storage, and an
+	// RFC 8555 Section 7.1.6 client polls processing without re-submitting
+	// finalize; once the reservation lapses the order must read as ready
+	// again so a retry can reclaim it. Presentation only — the durable
+	// reclaim happens when the retry reserves.
+	if order.Status == OrderStatusProcessing && !order.Reservation.Live(ca.reservationLease) {
+		order.Status = OrderStatusReady
 	}
 
 	if postData.postAsGet {
@@ -400,7 +428,8 @@ func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, or
 		return
 	}
 
-	if err := ca.finalizeCertificate(ctx, orderID, postData.accountID, finalizeReq.CSR); err != nil {
+	order, err := ca.finalizeCertificate(ctx, orderID, postData.accountID, finalizeReq.CSR)
+	if err != nil {
 		if prob, ok := errors.AsType[*Problem](err); ok {
 			ca.writeProblem(ctx, w, prob)
 		} else {
@@ -409,12 +438,6 @@ func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, or
 			ca.logger.ErrorContext(ctx, "Failed to finalize certificate", "error", err)
 			ca.writeProblem(ctx, w, InternalServerError("Failed to finalize certificate"))
 		}
-		return
-	}
-
-	order, err := ca.storage.GetOrder(ctx, orderID)
-	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Order not found"))
 		return
 	}
 
@@ -439,7 +462,7 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 
 	authz, err := ca.storage.GetAuthorization(ctx, authzID)
 	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Authorization not found"))
+		ca.writeProblem(ctx, w, lookupProblem(err, "Authorization"))
 		return
 	}
 	ctx = WithOrderID(ctx, authz.OrderID)
@@ -448,6 +471,12 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 		ca.writeProblem(ctx, w, Unauthorized("Authorization does not belong to account"))
 		return
 	}
+
+	// A settled challenge whose authorization promotion write was lost has
+	// nothing left to retry it — re-POSTs of a settled challenge
+	// short-circuit — so recompute on poll, as handleOrder does for
+	// pending orders.
+	ca.updateAuthorizationStatus(ctx, authz)
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, authz)
@@ -474,13 +503,13 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 	challenge, err := ca.storage.GetChallenge(ctx, challengeID)
 	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Challenge not found"))
+		ca.writeProblem(ctx, w, lookupProblem(err, "Challenge"))
 		return
 	}
 
 	authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Authorization not found for challenge"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get authorization for challenge"))
 		return
 	}
 	ctx = WithOrderID(ctx, authz.OrderID)
@@ -490,11 +519,36 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A crash mid-validation leaves the challenge processing in storage,
+	// and an RFC 8555 Section 7.1.6 client polls after responding once
+	// rather than re-POSTing; once the reservation lapses the challenge
+	// must read as pending again so the client can respond anew.
+	// Presentation only — the durable reclaim happens when the retry
+	// reserves.
+	if challenge.Status == ChallengeStatusProcessing && !challenge.Reservation.Live(ca.reservationLease) {
+		challenge.Status = ChallengeStatusPending
+	}
+
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
-	} else {
-		ca.handleChallengeResponse(ctx, w, challenge, postData)
+		return
 	}
+
+	// RFC 8555 Section 7.1.6: valid and invalid are final, so a repeat POST
+	// reports the state instead of failing. A processing challenge falls
+	// through: the reserve answers duplicates with the current state while
+	// its lease is live, and lets a retry reclaim an interrupted validation
+	// once it lapses.
+	if challenge.Status == ChallengeStatusValid || challenge.Status == ChallengeStatusInvalid {
+		// The short-circuit skips the recompute a fresh validation would
+		// run, so a promotion lost to a transient write failure would
+		// otherwise never retry.
+		ca.updateAuthorizationStatus(ctx, authz)
+		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
+		return
+	}
+
+	ca.handleChallengeResponse(ctx, w, challenge, postData)
 }
 
 func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
@@ -515,7 +569,7 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 
 	cert, err := ca.storage.GetCertificate(ctx, certID)
 	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Certificate not found"))
+		ca.writeProblem(ctx, w, lookupProblem(err, "Certificate"))
 		return
 	}
 
@@ -557,19 +611,25 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scrubStorageState strips storage-internal state — the stored attestation
-// object — from a client-facing copy; the ACME wire format has no such
-// field.
+// scrubStorageState strips storage-internal state — the reservation and the
+// stored attestation object — from a client-facing copy; the ACME wire
+// format has neither field.
 func scrubStorageState(data any) any {
 	switch v := data.(type) {
+	case *Order:
+		scrubbed := *v
+		scrubbed.Reservation = nil
+		return &scrubbed
 	case *Challenge:
 		scrubbed := *v
+		scrubbed.Reservation = nil
 		scrubbed.Attestation = nil
 		return &scrubbed
 	case *Authorization:
 		scrubbed := *v
 		scrubbed.Challenges = slices.Clone(v.Challenges)
 		for i := range scrubbed.Challenges {
+			scrubbed.Challenges[i].Reservation = nil
 			scrubbed.Challenges[i].Attestation = nil
 		}
 		return &scrubbed
@@ -629,21 +689,23 @@ func (ca *CA) writeProblem(ctx context.Context, w http.ResponseWriter, prob *Pro
 	}
 }
 
+// validateNonce returns a *Problem so the badNonce/serverInternal distinction
+// is made once, where the storage error is known; verifyPOST unwraps it.
 func (ca *CA) validateNonce(ctx context.Context, nonce string) error {
-	if _, err := ca.storage.ConsumeNonce(ctx, nonce, ca.nonceExpiry); err != nil {
-		if errors.Is(err, ErrNonceNotFound) {
-			ca.logger.ErrorContext(ctx, "Nonce not found")
-			return &NonceValidationError{Err: ErrNonceNotFound}
-		}
-		if errors.Is(err, ErrNonceExpired) {
-			ca.logger.ErrorContext(ctx, "Nonce expired")
-			return &NonceValidationError{Err: ErrNonceExpired}
-		}
-
+	_, err := ca.storage.ConsumeNonce(ctx, nonce, ca.nonceExpiry)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, ErrNotFound):
+		ca.logger.ErrorContext(ctx, "Nonce not found")
+		return BadNonce("Nonce not found")
+	case errors.Is(err, ErrNonceExpired):
+		ca.logger.ErrorContext(ctx, "Nonce expired")
+		return BadNonce("Nonce expired")
+	default:
 		ca.logger.ErrorContext(ctx, "Failed to consume nonce", "error", err)
-		return &NonceValidationError{Err: fmt.Errorf("failed to consume nonce: %w", err)}
+		return InternalServerError("Failed to validate nonce")
 	}
-	return nil
 }
 
 func (ca *CA) extractAccountIDFromKid(kid string) (string, error) {
@@ -669,8 +731,7 @@ func (ca *CA) generateAuthorizationID() string { return randomID(16) }
 func (ca *CA) generateChallengeID() string     { return randomID(16) }
 func (ca *CA) generateToken() string           { return randomID(32) }
 
-func (ca *CA) computeJWKHash(jwk *jose.JSONWebKey) (string, error) {
-	// Use JWK thumbprint as recommended by ACME spec
+func jwkThumbprint(jwk *jose.JSONWebKey) (string, error) {
 	thumbprint, err := jwk.Thumbprint(crypto.SHA256)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute JWK thumbprint: %w", err)
@@ -679,11 +740,9 @@ func (ca *CA) computeJWKHash(jwk *jose.JSONWebKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(thumbprint), nil
 }
 
+// createOrder assumes the account exists: its only caller reaches it through
+// lookupJWK, which has just loaded the account to authenticate the request.
 func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderRequest) (*Order, error) {
-	if _, err := ca.getAccount(ctx, accountID); err != nil {
-		return nil, fmt.Errorf("account not found: %w", err)
-	}
-
 	orderID := ca.generateOrderID()
 
 	var authzURLs []string
@@ -795,8 +854,18 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		AttStmt: attObj.AttStmt,
 	}
 
-	if err := ca.storage.SetChallengeProcessing(ctx, challenge.ID); err != nil {
-		ca.logger.ErrorContext(ctx, "Failed to update challenge status to processing", "error", err)
+	// The reservation is the persisted processing status under a lease:
+	// duplicate POSTs — concurrent, cross-process, or retries within the
+	// lease — are answered with the current state instead of a second
+	// validation, and a validation interrupted by a crash is reclaimed by
+	// a retry once the lease lapses.
+	reservationToken := randomID(16)
+	if err := ca.storage.ReserveChallengeValidation(ctx, challenge.ID, reservationToken, ca.reservationLease); err != nil {
+		if isFenceRejection(err) {
+			ca.reportChallengeState(ctx, w, challenge.ID)
+			return
+		}
+		ca.logger.ErrorContext(ctx, "Failed to reserve challenge for validation", "error", err)
 		ca.writeProblem(ctx, w, InternalServerError("Failed to update challenge status"))
 		return
 	}
@@ -804,36 +873,15 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Attestation verification failed", "challenge_id", challenge.ID, "error", err)
-
-		now := time.Now()
-		prob := Unauthorized("Attestation verification failed")
-
-		if updateErr := ca.storage.SetChallengeInvalid(ctx, challenge.ID, now, prob); updateErr != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update challenge status after verification failure", "error", updateErr)
-		}
-
-		ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
-
-		ca.writeProblem(ctx, w, prob)
+		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Attestation verification failed"))
 		return
 	}
-
-	// A validation that proves no identity must not settle valid: the
-	// DeviceInfo is what authorization and the certificate's SANs are
-	// built from.
+	// A validation that proves no identity must not settle valid: finalize
+	// derives the certificate's SANs from the DeviceInfo and refuses an
+	// order that yields none, so accepting it here would wedge the order.
 	if deviceInfo == nil {
 		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity", "challenge_id", challenge.ID, "format", attObj.Format)
-
-		now := time.Now()
-		prob := Unauthorized("Attestation yielded no device identity")
-
-		if updateErr := ca.storage.SetChallengeInvalid(ctx, challenge.ID, now, prob); updateErr != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update challenge status after empty verification", "error", updateErr)
-		}
-
-		ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
-
-		ca.writeProblem(ctx, w, prob)
+		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Attestation yielded no device identity"))
 		return
 	}
 
@@ -841,14 +889,17 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
 
-		now := time.Now()
-		prob := InternalServerError("Authorization check failed")
-
-		if updateErr := ca.storage.SetChallengeInvalid(ctx, challenge.ID, now, prob); updateErr != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update challenge status after authorization error", "error", updateErr)
+		// A failed authorizer call is a backend condition, not a verdict on
+		// the attestation; surrender the reservation so a retry can
+		// validate once it clears, instead of invalidating the challenge.
+		if releaseErr := ca.storage.ReleaseChallengeValidation(ctx, challenge.ID, reservationToken); releaseErr != nil {
+			// A fencing rejection means another request settled the
+			// challenge; its result stands. Anything else leaves the
+			// challenge processing, and it heals by lease expiry.
+			if !isFenceRejection(releaseErr) {
+				ca.logger.ErrorContext(ctx, "Failed to release challenge after authorization error", "error", releaseErr)
+			}
 		}
-
-		ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
 
 		ca.writeProblem(ctx, w, InternalServerError("Device authorization check failed"))
 		return
@@ -856,22 +907,17 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	if !authorized {
 		ca.logger.WarnContext(ctx, "Device not authorized", "challenge_id", challenge.ID)
-
-		now := time.Now()
-		prob := Unauthorized("Device not authorized for certificate issuance")
-
-		if updateErr := ca.storage.SetChallengeInvalid(ctx, challenge.ID, now, prob); updateErr != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update challenge status after authorization denial", "error", updateErr)
-		}
-
-		ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
-
-		ca.writeProblem(ctx, w, prob)
+		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Device not authorized for certificate issuance"))
 		return
 	}
 
 	now := time.Now()
-	if err := ca.storage.SetChallengeValid(ctx, challenge.ID, now, attObj.AttStmt); err != nil {
+	if err := ca.storage.SetChallengeValid(ctx, challenge.ID, reservationToken, now, attObjBytes); err != nil {
+		// Another writer settled the challenge first; report its result.
+		if isFenceRejection(err) {
+			ca.reportChallengeState(ctx, w, challenge.ID)
+			return
+		}
 		ca.logger.ErrorContext(ctx, "Failed to update challenge status to valid", "error", err)
 		ca.writeProblem(ctx, w, InternalServerError("Failed to update challenge status"))
 		return
@@ -879,7 +925,9 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	ca.logger.InfoContext(ctx, "Challenge validated", "challenge_id", challenge.ID, "type", challenge.Type)
 
-	ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
+	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
+		ca.updateAuthorizationStatus(ctx, authz)
+	}
 
 	challenge, err = ca.storage.GetChallenge(ctx, challenge.ID)
 	if err != nil {
@@ -890,9 +938,43 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
 }
 
+// reportChallengeState answers a request that lost a validation race with
+// the challenge's current stored state.
+func (ca *CA) reportChallengeState(ctx context.Context, w http.ResponseWriter, challengeID string) {
+	current, err := ca.storage.GetChallenge(ctx, challengeID)
+	if err != nil {
+		ca.logger.ErrorContext(ctx, "Failed to get challenge after lost validation race", "error", err)
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get challenge"))
+		return
+	}
+	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, current)
+}
+
+// failChallenge settles a reserved challenge as invalid and reports prob. A
+// fencing rejection means another request settled the challenge first: its
+// result is reported instead and the recompute is left to it.
+func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challenge *Challenge, reservationToken string, prob *Problem) {
+	if err := ca.storage.SetChallengeInvalid(ctx, challenge.ID, reservationToken, time.Now(), prob); err != nil {
+		if isFenceRejection(err) {
+			ca.reportChallengeState(ctx, w, challenge.ID)
+			return
+		}
+		ca.logger.ErrorContext(ctx, "Failed to update challenge status", "error", err)
+	}
+
+	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
+		ca.updateAuthorizationStatus(ctx, authz)
+	}
+	ca.writeProblem(ctx, w, prob)
+}
+
+// updateOrderStatus promotes a pending order once its authorizations settle.
+// The pending-only guard — enforced again by SetOrderStatus against the
+// stored record — keeps this recomputation from overwriting a status a
+// concurrent finalize has since written.
 func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
-	if order.Status == OrderStatusValid || order.Status == OrderStatusInvalid {
-		return // Final states
+	if order.Status != OrderStatusPending {
+		return
 	}
 
 	allValid := true
@@ -915,30 +997,38 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 		}
 	}
 
-	oldStatus := order.Status
-	if anyInvalid {
-		order.Status = OrderStatusInvalid
-	} else if allValid {
-		order.Status = OrderStatusReady
-	}
-
-	if oldStatus != order.Status {
-		ca.logger.DebugContext(ctx, "Order status changed", "order_id", order.ID, "old_status", oldStatus, "new_status", order.Status)
-	}
-
-	if err := ca.storage.UpdateOrder(ctx, order); err != nil {
-		ca.logger.ErrorContext(ctx, "Failed to update order status", "error", err)
-	}
-}
-
-func (ca *CA) updateAuthorizationStatus(ctx context.Context, authzID string) {
-	authz, err := ca.storage.GetAuthorization(ctx, authzID)
-	if err != nil {
+	var next string
+	switch {
+	case anyInvalid:
+		next = OrderStatusInvalid
+	case allValid:
+		next = OrderStatusReady
+	default:
 		return
 	}
 
-	if authz.Status == AuthzStatusValid || authz.Status == AuthzStatusInvalid {
-		return // Final states
+	// A mismatch means another request settled the order first; its result
+	// stands.
+	if err := ca.storage.SetOrderStatus(ctx, order.ID, OrderStatusPending, next); err != nil {
+		if !errors.Is(err, ErrStatusMismatch) {
+			ca.logger.ErrorContext(ctx, "Failed to update order status", "error", err)
+		}
+		return
+	}
+
+	ca.logger.DebugContext(ctx, "Order status changed", "order_id", order.ID, "old_status", order.Status, "new_status", next)
+	order.Status = next
+}
+
+// updateAuthorizationStatus settles a pending authorization once its
+// challenges settle, refreshing the embedded challenge copies with the
+// transition. The pending-only guard — enforced again by
+// SettleAuthorization against the stored record — keeps a recompute from
+// stale reads from overwriting a settlement another request has since
+// written; a recompute that settles nothing writes nothing.
+func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorization) {
+	if authz.Status != AuthzStatusPending {
+		return
 	}
 
 	// An authorization with no challenges must not count as valid.
@@ -952,9 +1042,17 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authzID string) {
 			continue
 		}
 
-		// The attestation blob belongs to the challenge record: finalize
-		// re-reads it there, so an embedded copy is dead weight persisted
-		// with every settled authorization.
+		// A processing challenge whose reservation lapsed reads as pending
+		// here for the same reason handleChallenge presents it that way: an
+		// RFC 8555 Section 7.5.1 client polls the authorization object, and
+		// a challenge shown as processing forever would never be re-POSTed.
+		if currentChallenge.Status == ChallengeStatusProcessing && !currentChallenge.Reservation.Live(ca.reservationLease) {
+			currentChallenge.Status = ChallengeStatusPending
+		}
+
+		// Reservations and attestation blobs belong to the challenge
+		// record, not embedded copies.
+		currentChallenge.Reservation = nil
 		currentChallenge.Attestation = nil
 		authz.Challenges[i] = *currentChallenge
 
@@ -967,95 +1065,87 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authzID string) {
 		}
 	}
 
-	oldStatus := authz.Status
-	if anyInvalid {
-		authz.Status = AuthzStatusInvalid
-	} else if allValid {
-		authz.Status = AuthzStatusValid
+	var next string
+	switch {
+	case anyInvalid:
+		next = AuthzStatusInvalid
+	case allValid:
+		next = AuthzStatusValid
+	default:
+		return
 	}
 
-	if oldStatus != authz.Status {
-		ca.logger.DebugContext(ctx, "Authorization status changed", "authz_id", authzID, "old_status", oldStatus, "new_status", authz.Status)
+	// A mismatch means another request settled the authorization first;
+	// its result stands.
+	authz.Status = next
+	if err := ca.storage.SettleAuthorization(ctx, authz); err != nil {
+		authz.Status = AuthzStatusPending
+		if !errors.Is(err, ErrStatusMismatch) {
+			ca.logger.ErrorContext(ctx, "Failed to update authorization status", "error", err)
+		}
+		return
 	}
 
-	if err := ca.storage.UpdateAuthorization(ctx, authz); err != nil {
-		ca.logger.ErrorContext(ctx, "Failed to update authorization status", "error", err)
-	}
+	ca.logger.DebugContext(ctx, "Authorization status changed", "authz_id", authz.ID, "old_status", AuthzStatusPending, "new_status", next)
 
-	if oldStatus != authz.Status && authz.OrderID != "" {
+	if authz.OrderID != "" {
 		if order, err := ca.storage.GetOrder(ctx, authz.OrderID); err == nil {
 			ca.updateOrderStatus(ctx, order)
 		}
 	}
 }
 
-func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string, csrB64 string) error {
+func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string, csrB64 string) (*Order, error) {
 	// Decode base64url-encoded CSR DER
 	// RFC 8555 Section 7.4: "csr (required, string): A CSR encoding the parameters for the
 	// certificate being requested [RFC2986]. The CSR is sent in the
 	// base64url-encoded version of the DER format."
 	csrDER, err := base64.RawURLEncoding.DecodeString(csrB64)
 	if err != nil {
-		return BadCSR("Invalid CSR base64url encoding")
+		return nil, BadCSR("Invalid CSR base64url encoding")
 	}
 
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
-		return BadCSR("Failed to parse CSR")
+		return nil, BadCSR("Failed to parse CSR")
 	}
 
 	if err := csr.CheckSignature(); err != nil {
-		return BadCSR(fmt.Sprintf("CSR signature verification failed: %s", err.Error()))
+		return nil, BadCSR(fmt.Sprintf("CSR signature verification failed: %s", err.Error()))
 	}
 
+	// Existence and ownership are settled before the reservation is taken,
+	// so a request that has no claim on the order can never hold its lock.
 	order, err := ca.storage.GetOrder(ctx, orderID)
 	if err != nil {
-		return Malformed("Order not found")
+		return nil, lookupProblem(err, "Order")
 	}
 
 	if order.AccountID != accountID {
-		return Unauthorized("Order does not belong to account")
+		return nil, Unauthorized("Order does not belong to account")
 	}
 
-	if order.Status != OrderStatusReady {
-		return OrderNotReady("Order is not ready for finalization")
-	}
-
-	var deviceInfos []*DeviceInfo
-	for _, authzURL := range order.Authorizations {
-		authzID := extractIDFromURL(authzURL, "/authz/")
-		authz, err := ca.storage.GetAuthorization(ctx, authzID)
-		if err != nil || authz.Status != AuthzStatusValid {
-			continue
+	// The reservation is the persisted processing status under a lease, so
+	// exclusivity holds across CA processes sharing this storage, and a
+	// crashed holder is reclaimable once the lease lapses. The snapshot
+	// read above stays valid: readiness is judged atomically by the
+	// reserve, and every field used below is immutable after CreateOrder.
+	token := randomID(16)
+	if err := ca.storage.ReserveOrderFinalize(ctx, orderID, token, ca.reservationLease); err != nil {
+		switch {
+		case errors.Is(err, ErrReserved):
+			return nil, OrderNotReady("Order finalization is already in progress")
+		case errors.Is(err, ErrStatusMismatch):
+			return nil, OrderNotReady("Order is not ready for finalization")
+		case errors.Is(err, ErrNotFound):
+			return nil, lookupProblem(err, "Order")
 		}
-
-		for _, challenge := range authz.Challenges {
-			if challenge.Status == ChallengeStatusValid {
-				challengeObj, err := ca.storage.GetChallenge(ctx, challenge.ID)
-				if err == nil && challengeObj != nil {
-					deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challengeObj)
-					if err == nil && deviceInfo != nil {
-						deviceInfos = append(deviceInfos, deviceInfo)
-					}
-				}
-				break
-			}
-		}
+		return nil, fmt.Errorf("failed to reserve order for finalization: %w", err)
 	}
 
-	cert, err := ca.certificateIssuer.IssueCertificate(ctx, csr, deviceInfos)
+	cert, deviceInfos, err := ca.issueForOrder(ctx, order, csr, token)
 	if err != nil {
-		return fmt.Errorf("failed to issue certificate: %w", err)
-	}
-
-	if err := ca.storage.CreateCertificate(ctx, cert); err != nil {
-		return fmt.Errorf("failed to store certificate: %w", err)
-	}
-
-	order.Status = OrderStatusValid
-	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.SerialNumber))
-	if err := ca.storage.UpdateOrder(ctx, order); err != nil {
-		return fmt.Errorf("failed to update order: %w", err)
+		return nil, err
 	}
 
 	ca.logger.InfoContext(ctx, "Certificate issued", "serial_number", cert.SerialNumber)
@@ -1096,32 +1186,142 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 		}
 	}
 
-	return nil
+	return order, nil
 }
 
+// issueForOrder issues the certificate for a reserved order and commits it
+// atomically with the order's valid transition. Nothing is persisted until
+// that commit, so a failure releases the reservation and discards the
+// signed certificate — a retry issues a fresh certificate for the CSR it
+// actually carries, so a stored certificate never predates the CSR that
+// finalized the order — and a crash leaves the order processing until the
+// lease lapses and a retry reclaims it.
+func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.CertificateRequest, token string) (*Certificate, []*DeviceInfo, error) {
+	deviceInfos, err := ca.deviceInfosForOrder(ctx, order)
+	if err != nil {
+		return nil, nil, ca.failOrder(ctx, order.ID, token, err)
+	}
+
+	cert, err := ca.certificateIssuer.IssueCertificate(ctx, csr, deviceInfos)
+	if err != nil {
+		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
+	}
+	cert.ID = order.ID
+
+	order.Status = OrderStatusValid
+	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.ID))
+	order.Reservation = nil
+	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
+		ca.logger.ErrorContext(ctx, "Discarding signed certificate after failed completion", "serial_number", cert.SerialNumber, "error", err)
+		// A fencing rejection means the lease lapsed and another finalize
+		// reclaimed the order; its outcome stands and there is no
+		// reservation left to release. That is a client-state condition
+		// like losing the reserve itself, not a backend failure: a 5xx
+		// would invite a retry of a finalize that has been superseded.
+		if isFenceRejection(err) {
+			return nil, nil, OrderNotReady("Order finalization was superseded by another request")
+		}
+		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to complete order: %w", err))
+	}
+
+	return cert, deviceInfos, nil
+}
+
+// failOrder releases the finalize reservation, distinguishing terminal
+// failures from transient ones. A client-fault problem can only recur on
+// retry, so the order moves to invalid per RFC 8555 Section 7.1.6 and the
+// client abandons it; anything else returns the order to ready so a retry
+// can finalize again.
+func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) error {
+	to := OrderStatusReady
+	if prob, ok := errors.AsType[*Problem](err); ok && prob.Status < http.StatusInternalServerError {
+		to = OrderStatusInvalid
+	}
+	switch serr := ca.storage.ReleaseOrderFinalize(ctx, orderID, token, to); {
+	case serr == nil:
+	case isFenceRejection(serr):
+		// The lease lapsed and another finalize took over; its outcome
+		// stands.
+		ca.logger.DebugContext(ctx, "Finalize reservation was reclaimed", "error", serr)
+	default:
+		// The order stays processing and heals by lease expiry.
+		ca.logger.ErrorContext(ctx, "Failed to release order after finalize failure", "error", serr)
+	}
+	return err
+}
+
+// deviceInfosForOrder re-derives the attested device identity for each valid
+// authorization. Any failure aborts the finalize: the order only reached
+// "ready" through a successful attestation, so issuing without the identity
+// it proved would silently strip the SANs from the certificate. An empty
+// result means no authorization reads valid — inconsistent state that may
+// heal — so it is refused as retriable rather than issued identity-less.
+func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceInfo, error) {
+	var deviceInfos []*DeviceInfo
+	for _, authzURL := range order.Authorizations {
+		authzID := extractIDFromURL(authzURL, "/authz/")
+		authz, err := ca.storage.GetAuthorization(ctx, authzID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get authorization: %w", err)
+		}
+		if authz.Status != AuthzStatusValid {
+			continue
+		}
+
+		for _, challenge := range authz.Challenges {
+			if challenge.Status != ChallengeStatusValid {
+				continue
+			}
+			challengeObj, err := ca.storage.GetChallenge(ctx, challenge.ID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get challenge: %w", err)
+			}
+			deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challengeObj)
+			if err != nil {
+				return nil, fmt.Errorf("failed to extract device info: %w", err)
+			}
+			if deviceInfo != nil {
+				deviceInfos = append(deviceInfos, deviceInfo)
+			}
+			break
+		}
+	}
+	if len(deviceInfos) == 0 {
+		return nil, errors.New("no valid authorization yields an attested identity")
+	}
+	return deviceInfos, nil
+}
+
+// extractDeviceInfoFromChallenge re-verifies the attestation stored with a
+// validated challenge. A missing or undecodable stored attestation can only
+// recur on retry, so those are unauthorized problems failOrder treats as
+// terminal. A missing verifier is this instance's configuration and a
+// re-verification failure is environmental — the statement already passed
+// verification at challenge time — so both return plain errors that keep
+// the order retriable.
 func (ca *CA) extractDeviceInfoFromChallenge(ctx context.Context, challenge *Challenge) (*DeviceInfo, error) {
-	if challenge.Attestation == nil {
-		return nil, errors.New("no attestation data in challenge")
+	if len(challenge.Attestation) == 0 {
+		return nil, Unauthorized("No attestation recorded for challenge")
 	}
 
-	format, ok := challenge.Attestation["fmt"].(string)
-	if !ok {
-		return nil, errors.New("attestation format not found")
+	var attObj AttestationObject
+	if err := cbor.Unmarshal(challenge.Attestation, &attObj); err != nil {
+		return nil, Unauthorized("Stored attestation is not usable")
 	}
 
-	verifier, exists := ca.verifiers[format]
+	verifier, exists := ca.verifiers[attObj.Format]
 	if !exists {
-		return nil, fmt.Errorf("no verifier for format: %s", format)
+		return nil, fmt.Errorf("no verifier registered for attestation format %q", attObj.Format)
 	}
 
 	stmt := AttestationStatement{
-		Format:  format,
-		AttStmt: challenge.Attestation,
+		Format:  attObj.Format,
+		AttStmt: attObj.AttStmt,
 	}
 
 	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify attestation: %w", err)
+		return nil, fmt.Errorf("failed to re-verify attestation: %w", err)
 	}
 
 	return deviceInfo, nil
