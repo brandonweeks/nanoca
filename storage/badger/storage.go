@@ -506,7 +506,11 @@ func (s *Storage) ReleaseChallengeValidation(_ context.Context, id, reservationT
 }
 
 func (s *Storage) CompleteOrder(_ context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+	// CompleteOrder owns the processing-to-valid transition; forcing the
+	// status here keeps a stored certificate from ever sharing a record
+	// with a non-valid order, whatever the caller passed.
 	completed := *order
+	completed.Status = nanoca.OrderStatusValid
 	completed.Reservation = nil
 
 	return s.update(func(txn *badger.Txn) error {
