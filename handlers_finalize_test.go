@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -77,6 +78,8 @@ func TestFinalizeObserverErrorStillIssues(t *testing.T) {
 	}
 }
 
+// RFC 8555 Section 7.4: finalizing an order that is not ready MUST return
+// 403 orderNotReady, which clients treat as retriable; malformed is terminal.
 func TestFinalizeNotReady(t *testing.T) {
 	t.Parallel()
 
@@ -84,7 +87,16 @@ func TestFinalizeNotReady(t *testing.T) {
 
 	client := newACMEClient(t, ts)
 	order, _ := pendingChallenge(t, client, "pending-device")
-	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
-		t.Error("CreateOrderCert() error = nil, want not-ready failure")
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+
+	var ae *acme.Error
+	if !errors.As(err, &ae) {
+		t.Fatalf("CreateOrderCert() error = %v, want *acme.Error", err)
+	}
+	if ae.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", ae.StatusCode, http.StatusForbidden)
+	}
+	if ae.ProblemType != "urn:ietf:params:acme:error:orderNotReady" {
+		t.Errorf("problem type = %q, want orderNotReady", ae.ProblemType)
 	}
 }
