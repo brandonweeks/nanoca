@@ -40,7 +40,7 @@ func lookupProblem(err error, resource string) *Problem {
 	if errors.Is(err, ErrNotFound) {
 		return Malformed(resource + " not found")
 	}
-	return InternalServerError("Failed to get " + strings.ToLower(resource))
+	return InternalServerError("Failed to get " + strings.ToLower(resource)).WithCause(err)
 }
 
 // isFenceRejection reports whether a guarded or fenced storage write was
@@ -88,7 +88,7 @@ func (ca *CA) handleNewNonce(w http.ResponseWriter, r *http.Request) {
 
 	nonce, err := ca.generateNonce(ctx)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce").WithCause(err))
 		return
 	}
 
@@ -123,13 +123,13 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 
 	keyThumbprint, err := jwkThumbprint(postData.jwk)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to process key"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to process key").WithCause(err))
 		return
 	}
 
 	existingAccount, err := ca.storage.GetAccountByKey(ctx, keyThumbprint)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to look up account"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to look up account").WithCause(err))
 		return
 	}
 	if err == nil {
@@ -276,7 +276,7 @@ func (ca *CA) verifyPOST(r *http.Request, kx keyExtractor) (*authenticatedPOST, 
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return nil, RequestTooLarge("Request body too large")
 		}
-		return nil, InternalServerError("Failed to read request body")
+		return nil, InternalServerError("Failed to read request body").WithCause(err)
 	}
 
 	if len(bodyBytes) == 0 {
@@ -349,7 +349,7 @@ func (ca *CA) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 
 	order, err := ca.createOrder(ctx, postData.accountID, orderReq)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to create order"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to create order").WithCause(err))
 		return
 	}
 	ctx = WithOrderID(ctx, order.ID)
@@ -433,10 +433,7 @@ func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, or
 		if prob, ok := errors.AsType[*Problem](err); ok {
 			ca.writeProblem(ctx, w, prob)
 		} else {
-			// writeProblem logs only the generic detail; without this line
-			// the cause of the 500 is lost.
-			ca.logger.ErrorContext(ctx, "Failed to finalize certificate", "error", err)
-			ca.writeProblem(ctx, w, InternalServerError("Failed to finalize certificate"))
+			ca.writeProblem(ctx, w, InternalServerError("Failed to finalize certificate").WithCause(err))
 		}
 		return
 	}
@@ -509,7 +506,7 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 
 	authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to get authorization for challenge"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get authorization for challenge").WithCause(err))
 		return
 	}
 	ctx = WithOrderID(ctx, authz.OrderID)
@@ -575,7 +572,7 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 
 	orders, err := ca.storage.GetOrdersByAccount(ctx, postData.accountID)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to get orders"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get orders").WithCause(err))
 		return
 	}
 
@@ -595,7 +592,7 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 
 	nonce, err := ca.generateNonce(ctx)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce").WithCause(err))
 		return
 	}
 
@@ -640,7 +637,7 @@ func scrubStorageState(data any) any {
 func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, statusCode int, data any, nonce string) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(scrubStorageState(data)); err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to encode response"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to encode response").WithCause(err))
 		return
 	}
 
@@ -658,17 +655,21 @@ func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, stat
 func (ca *CA) writeJSONResponseWithNonce(ctx context.Context, w http.ResponseWriter, statusCode int, data any) {
 	nonce, err := ca.generateNonce(ctx)
 	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to generate nonce").WithCause(err))
 		return
 	}
 	ca.writeJSONResponse(ctx, w, statusCode, data, nonce)
 }
 
 func (ca *CA) writeProblem(ctx context.Context, w http.ResponseWriter, prob *Problem) {
+	attrs := []any{"status", prob.Status, "type", prob.Type, "detail", prob.Detail}
+	if prob.Cause != nil {
+		attrs = append(attrs, "error", prob.Cause)
+	}
 	if prob.Status >= 500 {
-		ca.logger.ErrorContext(ctx, "Server error", "status", prob.Status, "type", prob.Type, "detail", prob.Detail)
+		ca.logger.ErrorContext(ctx, "Server error", attrs...)
 	} else {
-		ca.logger.WarnContext(ctx, "Client error", "status", prob.Status, "type", prob.Type, "detail", prob.Detail)
+		ca.logger.WarnContext(ctx, "Client error", attrs...)
 	}
 
 	// RFC 8555 Section 6.5: "The server MUST include a Replay-Nonce header field in every
@@ -931,8 +932,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	challenge, err = ca.storage.GetChallenge(ctx, challenge.ID)
 	if err != nil {
-		ca.logger.ErrorContext(ctx, "Failed to re-fetch challenge after validation", "error", err)
-		ca.writeProblem(ctx, w, InternalServerError("Failed to retrieve challenge"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to retrieve challenge after validation").WithCause(err))
 		return
 	}
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
@@ -943,8 +943,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 func (ca *CA) reportChallengeState(ctx context.Context, w http.ResponseWriter, challengeID string) {
 	current, err := ca.storage.GetChallenge(ctx, challengeID)
 	if err != nil {
-		ca.logger.ErrorContext(ctx, "Failed to get challenge after lost validation race", "error", err)
-		ca.writeProblem(ctx, w, InternalServerError("Failed to get challenge"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get challenge after lost validation race").WithCause(err))
 		return
 	}
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, current)

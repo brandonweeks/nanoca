@@ -100,6 +100,9 @@ func TestFinalizeIssuerErrorLogged(t *testing.T) {
 	if !strings.Contains(logs.String(), "issuer unavailable") {
 		t.Errorf("finalize failure logs omit the issuer error %q:\n%s", "issuer unavailable", logs.String())
 	}
+	if got := strings.Count(logs.String(), "level=ERROR"); got != 1 {
+		t.Errorf("finalize failure produced %d error records, want 1:\n%s", got, logs.String())
+	}
 }
 
 func TestFinalizeObserverErrorStillIssues(t *testing.T) {

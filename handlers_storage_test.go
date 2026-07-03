@@ -269,6 +269,59 @@ func TestNewOrderStorageFailure(t *testing.T) {
 	wantServerInternal(t, err)
 }
 
+// The client only ever sees the generic serverInternal detail, so the
+// backend error has to reach the server log or the 500 cannot be debugged.
+func TestNewOrderStorageFailureLogged(t *testing.T) {
+	t.Parallel()
+
+	var logs syncBuffer
+	ts, _ := newTestServer(t, testServerConfig{
+		logger:  slog.New(slog.NewTextHandler(&logs, nil)),
+		storage: orderCreateFailingStorage{Storage: newTestStorage(t)},
+		issuer:  stubIssuer{},
+	})
+
+	client := newUnregisteredClient(t, ts)
+	if _, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+	if _, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{{Type: "permanent-identifier", Value: "device"}}); err == nil {
+		t.Fatal("AuthorizeOrder() error = nil, want storage failure")
+	}
+
+	if !strings.Contains(logs.String(), "backend unavailable") {
+		t.Errorf("new-order failure logs omit the storage error %q:\n%s", "backend unavailable", logs.String())
+	}
+}
+
+func TestFinalizeStorageFailureLogged(t *testing.T) {
+	t.Parallel()
+
+	var logs syncBuffer
+	ts, _ := newTestServer(t, testServerConfig{
+		logger:  slog.New(slog.NewTextHandler(&logs, nil)),
+		storage: orderLookupFailingStorage{Storage: newTestStorage(t)},
+		issuer:  stubIssuer{},
+	})
+
+	client := newUnregisteredClient(t, ts)
+	if _, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{{Type: "permanent-identifier", Value: "device"}})
+	if err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
+		t.Fatal("CreateOrderCert() error = nil, want storage failure")
+	}
+
+	if !strings.Contains(logs.String(), "backend unavailable") {
+		t.Errorf("finalize failure logs omit the storage error %q:\n%s", "backend unavailable", logs.String())
+	}
+}
+
 // An ErrNotFound wrapped out of CreateOrder is a backend failure, not proof
 // the account is gone: accountDoesNotExist makes clients discard their
 // registration and re-enroll.
