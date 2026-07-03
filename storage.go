@@ -13,7 +13,9 @@ import (
 // internal server errors.
 //
 //   - Get*, Update*, Settle*, Reserve*, and SetChallenge* must return
-//     ErrNotFound when the object does not exist.
+//     ErrNotFound when the object does not exist. GetOrdersByAccount is the
+//     exception: an account with no orders yields an empty slice and no
+//     error.
 //   - ConsumeNonce must return ErrNotFound for an unknown or already
 //     consumed nonce, and ErrNonceExpired after consuming an expired one.
 //   - CreateAccount must return ErrAccountExists, atomically with the
@@ -26,7 +28,9 @@ import (
 //     token (CompleteOrder, ReleaseOrderFinalize, ReleaseChallengeValidation,
 //     SetChallengeValid, SetChallengeInvalid) must return ErrReserved when
 //     the presented token does not match the stored reservation, and clear
-//     the reservation on success.
+//     the reservation on success. The lease is judged only at reserve time:
+//     a write with the matching token must succeed even after the lease has
+//     lapsed, so a slow holder that was not superseded can still commit.
 //
 // Reservation leases are judged by comparing the stored ReservedAt against
 // the caller-supplied duration with the backend's clock, so a shared
