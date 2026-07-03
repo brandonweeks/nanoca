@@ -328,7 +328,7 @@ func (ca *CA) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 
 	order, err := ca.createOrder(ctx, postData.accountID, orderReq)
 	if err != nil {
-		ca.writeProblem(ctx, w, Malformed("Failed to create order"))
+		ca.writeProblem(ctx, w, InternalServerError("Failed to create order"))
 		return
 	}
 	ctx = WithOrderID(ctx, order.ID)
@@ -390,7 +390,14 @@ func (ca *CA) handleOrderFinalize(ctx context.Context, w http.ResponseWriter, or
 	}
 
 	if err := ca.finalizeCertificate(ctx, orderID, postData.accountID, finalizeReq.CSR); err != nil {
-		ca.writeProblem(ctx, w, Malformed("Failed to finalize certificate"))
+		if prob, ok := errors.AsType[*Problem](err); ok {
+			ca.writeProblem(ctx, w, prob)
+		} else {
+			// writeProblem logs only the generic detail; without this line
+			// the cause of the 500 is lost.
+			ca.logger.ErrorContext(ctx, "Failed to finalize certificate", "error", err)
+			ca.writeProblem(ctx, w, InternalServerError("Failed to finalize certificate"))
+		}
 		return
 	}
 
@@ -934,12 +941,12 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 	// base64url-encoded version of the DER format."
 	csrDER, err := base64.RawURLEncoding.DecodeString(csrB64)
 	if err != nil {
-		return fmt.Errorf("invalid CSR base64url encoding: %w", err)
+		return BadCSR("Invalid CSR base64url encoding")
 	}
 
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
-		return fmt.Errorf("failed to parse CSR: %w", err)
+		return BadCSR("Failed to parse CSR")
 	}
 
 	if err := csr.CheckSignature(); err != nil {
@@ -948,15 +955,15 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 
 	order, err := ca.storage.GetOrder(ctx, orderID)
 	if err != nil {
-		return errors.New("order not found")
+		return Malformed("Order not found")
 	}
 
 	if order.AccountID != accountID {
-		return errors.New("order does not belong to account")
+		return Unauthorized("Order does not belong to account")
 	}
 
 	if order.Status != OrderStatusReady {
-		return errors.New("order is not ready for finalization")
+		return OrderNotReady("Order is not ready for finalization")
 	}
 
 	var deviceInfos []*DeviceInfo

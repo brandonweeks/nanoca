@@ -16,6 +16,7 @@ const (
 	badSignatureAlgorithmErr = ACMEProblemTypePrefix + "badSignatureAlgorithm"
 	invalidContactErr        = ACMEProblemTypePrefix + "invalidContact"
 	malformedErr             = ACMEProblemTypePrefix + "malformed"
+	orderNotReadyErr         = ACMEProblemTypePrefix + "orderNotReady"
 	serverInternalErr        = ACMEProblemTypePrefix + "serverInternal"
 	unauthorizedErr          = ACMEProblemTypePrefix + "unauthorized"
 )
@@ -103,6 +104,17 @@ func InvalidContact(detail string) *Problem {
 		Type:   invalidContactErr,
 		Detail: detail,
 		Status: http.StatusBadRequest,
+	}
+}
+
+func OrderNotReady(detail string) *Problem {
+	// RFC 8555 Section 7.4: "A request to finalize an order will result in error if the order is
+	// not in the 'ready' state. In such cases, the server MUST return a 403 (Forbidden) error with
+	// a problem document of type 'orderNotReady'."
+	return &Problem{
+		Type:   orderNotReadyErr,
+		Detail: detail,
+		Status: http.StatusForbidden,
 	}
 }
 

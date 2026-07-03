@@ -8,8 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/brandonweeks/nanoca"
 	nullauthorizer "github.com/brandonweeks/nanoca/authorizers/null"
@@ -29,7 +31,14 @@ func newACMEClient(t *testing.T, ts *httptest.Server) *acme.Client {
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
-	client := &acme.Client{DirectoryURL: ts.URL + "/directory", HTTPClient: ts.Client(), Key: key}
+	client := &acme.Client{
+		DirectoryURL: ts.URL + "/directory",
+		HTTPClient:   ts.Client(),
+		Key:          key,
+		// The client treats every 5xx as retriable and would loop until the
+		// test context is cancelled; fail on the first response instead.
+		RetryBackoff: func(int, *http.Request, *http.Response) time.Duration { return -1 },
+	}
 	if _, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
 		t.Fatalf("failed to register account: %v", err)
 	}
