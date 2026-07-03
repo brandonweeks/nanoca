@@ -326,6 +326,16 @@ func (ca *CA) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only attestable identifier types get a challenge in createOrder; any
+	// other type would yield an authorization with no challenges, which
+	// nothing could ever validate.
+	for _, identifier := range orderReq.Identifiers {
+		if identifier.Type != IdentifierTypePermanentIdentifier && identifier.Type != IdentifierTypeHardwareModule {
+			ca.writeProblem(ctx, w, UnsupportedIdentifier(fmt.Sprintf("Unsupported identifier type %q", identifier.Type)))
+			return
+		}
+	}
+
 	order, err := ca.createOrder(ctx, postData.accountID, orderReq)
 	if err != nil {
 		ca.writeProblem(ctx, w, InternalServerError("Failed to create order"))
@@ -891,7 +901,8 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authzID string) {
 		return // Final states
 	}
 
-	allValid := true
+	// An authorization with no challenges must not count as valid.
+	allValid := len(authz.Challenges) > 0
 	anyInvalid := false
 
 	for i, challenge := range authz.Challenges {

@@ -19,6 +19,7 @@ const (
 	orderNotReadyErr         = ACMEProblemTypePrefix + "orderNotReady"
 	serverInternalErr        = ACMEProblemTypePrefix + "serverInternal"
 	unauthorizedErr          = ACMEProblemTypePrefix + "unauthorized"
+	unsupportedIdentifierErr = ACMEProblemTypePrefix + "unsupportedIdentifier"
 )
 
 // Problem represents an RFC 7807/9457 compliant problem details object
@@ -123,6 +124,14 @@ func Unauthorized(detail string) *Problem {
 		Type:   unauthorizedErr,
 		Detail: detail,
 		Status: http.StatusForbidden,
+	}
+}
+
+func UnsupportedIdentifier(detail string) *Problem {
+	return &Problem{
+		Type:   unsupportedIdentifierErr,
+		Detail: detail,
+		Status: http.StatusBadRequest,
 	}
 }
 
