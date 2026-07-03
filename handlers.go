@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -556,9 +557,29 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// scrubStorageState strips storage-internal state — the stored attestation
+// object — from a client-facing copy; the ACME wire format has no such
+// field.
+func scrubStorageState(data any) any {
+	switch v := data.(type) {
+	case *Challenge:
+		scrubbed := *v
+		scrubbed.Attestation = nil
+		return &scrubbed
+	case *Authorization:
+		scrubbed := *v
+		scrubbed.Challenges = slices.Clone(v.Challenges)
+		for i := range scrubbed.Challenges {
+			scrubbed.Challenges[i].Attestation = nil
+		}
+		return &scrubbed
+	}
+	return data
+}
+
 func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, statusCode int, data any, nonce string) {
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(data); err != nil {
+	if err := json.NewEncoder(&buf).Encode(scrubStorageState(data)); err != nil {
 		ca.writeProblem(ctx, w, InternalServerError("Failed to encode response"))
 		return
 	}
@@ -931,6 +952,10 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authzID string) {
 			continue
 		}
 
+		// The attestation blob belongs to the challenge record: finalize
+		// re-reads it there, so an embedded copy is dead weight persisted
+		// with every settled authorization.
+		currentChallenge.Attestation = nil
 		authz.Challenges[i] = *currentChallenge
 
 		if currentChallenge.Status == "invalid" {
