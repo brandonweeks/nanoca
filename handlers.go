@@ -797,6 +797,25 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
+	// A validation that proves no identity must not settle valid: the
+	// DeviceInfo is what authorization and the certificate's SANs are
+	// built from.
+	if deviceInfo == nil {
+		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity", "challenge_id", challenge.ID, "format", attObj.Format)
+
+		now := time.Now()
+		prob := Unauthorized("Attestation yielded no device identity")
+
+		if updateErr := ca.storage.SetChallengeInvalid(ctx, challenge.ID, now, prob); updateErr != nil {
+			ca.logger.ErrorContext(ctx, "Failed to update challenge status after empty verification", "error", updateErr)
+		}
+
+		ca.updateAuthorizationStatus(ctx, challenge.AuthzID)
+
+		ca.writeProblem(ctx, w, prob)
+		return
+	}
+
 	authorized, err := ca.authorizer.Authorize(ctx, deviceInfo)
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
