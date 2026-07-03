@@ -6,32 +6,43 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
-// The stored attestation object is a storage concern; it must never reach
-// the ACME wire format, and scrubbing it must not mutate the stored
-// record's copy.
+// Reservations and the stored attestation blob are storage concerns; they
+// must never reach the ACME wire format, and scrubbing them must not mutate
+// the stored record's copy.
 func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	t.Parallel()
 
 	ca := &CA{logger: slog.New(slog.DiscardHandler)}
-	attestation := map[string]any{"fmt": "apple", "x5c": "leaf"}
+	reservation := func() *Reservation {
+		return &Reservation{Token: "token", ReservedAt: time.Now()}
+	}
+	attestation := []byte("attestation-object")
 
-	challenge := &Challenge{ID: "c1", Status: ChallengeStatusValid, Attestation: attestation}
-	authz := &Authorization{ID: "a1", Challenges: []Challenge{{ID: "c1", Attestation: attestation}}}
+	order := &Order{ID: "o1", Status: OrderStatusProcessing, Reservation: reservation()}
+	challenge := &Challenge{ID: "c1", Status: ChallengeStatusValid, Attestation: attestation, Reservation: reservation()}
+	authz := &Authorization{ID: "a1", Challenges: []Challenge{{ID: "c1", Attestation: attestation, Reservation: reservation()}}}
 
 	for name, data := range map[string]any{
+		"order":         order,
 		"challenge":     challenge,
 		"authorization": authz,
 	} {
 		rec := httptest.NewRecorder()
 		ca.writeJSONResponse(t.Context(), rec, http.StatusOK, data, "")
-		if body := rec.Body.String(); strings.Contains(body, "attestation") {
-			t.Errorf("%s response leaks attestation state:\n%s", name, body)
+		for _, field := range []string{"reservation", "attestation"} {
+			if body := rec.Body.String(); strings.Contains(body, field) {
+				t.Errorf("%s response leaks %s state:\n%s", name, field, body)
+			}
 		}
 	}
 
-	if challenge.Attestation == nil || authz.Challenges[0].Attestation == nil {
+	if order.Reservation == nil || challenge.Reservation == nil || authz.Challenges[0].Reservation == nil {
 		t.Error("scrubbing mutated the caller's records")
+	}
+	if challenge.Attestation == nil || authz.Challenges[0].Attestation == nil {
+		t.Error("scrubbing mutated the caller's attestation")
 	}
 }

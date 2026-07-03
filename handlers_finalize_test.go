@@ -1,6 +1,7 @@
 package nanoca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,8 +9,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brandonweeks/nanoca"
@@ -55,7 +59,7 @@ func driveToReady(t *testing.T, ts *httptest.Server) (*acme.Client, *acme.Order)
 func TestFinalizeIssuerError(t *testing.T) {
 	t.Parallel()
 
-	ts, _ := newTestServer(t, nullauthorizer.New(), failingIssuer{}, nil)
+	ts, _ := newTestServer(t, testServerConfig{issuer: failingIssuer{}})
 
 	client, order := driveToReady(t, ts)
 	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
@@ -63,10 +67,45 @@ func TestFinalizeIssuerError(t *testing.T) {
 	}
 }
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The client only sees "Failed to finalize certificate", so the causing error
+// has to reach the server log or the 500 cannot be debugged.
+func TestFinalizeIssuerErrorLogged(t *testing.T) {
+	t.Parallel()
+
+	var logs syncBuffer
+	ts, _ := newTestServer(t, testServerConfig{logger: slog.New(slog.NewTextHandler(&logs, nil)), issuer: failingIssuer{}})
+
+	client, order := driveToReady(t, ts)
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
+		t.Fatal("CreateOrderCert() error = nil, want issuer failure")
+	}
+
+	if !strings.Contains(logs.String(), "issuer unavailable") {
+		t.Errorf("finalize failure logs omit the issuer error %q:\n%s", "issuer unavailable", logs.String())
+	}
+}
+
 func TestFinalizeObserverErrorStillIssues(t *testing.T) {
 	t.Parallel()
 
-	ts, _ := newTestServer(t, nullauthorizer.New(), nil, failingObserver{})
+	ts, _ := newTestServer(t, testServerConfig{observer: failingObserver{}})
 
 	client, order := driveToReady(t, ts)
 	cert, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)

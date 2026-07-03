@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/brandonweeks/nanoca"
 	nullauthorizer "github.com/brandonweeks/nanoca/authorizers/null"
@@ -61,6 +62,28 @@ func TestNewValidation(t *testing.T) {
 				t.Error("New() error = nil, want error")
 			}
 		})
+	}
+}
+
+// A nonpositive lease makes every reservation expired at birth: concurrent
+// finalizes each reclaim the other's reservation and both sign, silently
+// voiding the exclusivity the reservation exists to provide.
+func TestNewRejectsNonpositiveReservationLease(t *testing.T) {
+	t.Parallel()
+
+	for _, d := range []time.Duration{0, -time.Minute} {
+		_, err := nanoca.New(
+			slog.New(slog.DiscardHandler),
+			stubIssuer{},
+			nullauthorizer.New(),
+			newTestStorage(t),
+			"https://ca.example",
+			nanoca.WithVerifier(null.New()),
+			nanoca.WithReservationLease(d),
+		)
+		if err == nil {
+			t.Errorf("New(WithReservationLease(%v)) error = nil, want error", d)
+		}
 	}
 }
 

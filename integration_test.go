@@ -207,10 +207,23 @@ func TestDeviceAttestationFlow(t *testing.T) {
 
 func setupTestServerWithAttestation(t *testing.T, authorizer nanoca.Authorizer) (*httptest.Server, *nanoca.CA) {
 	t.Helper()
-	return newTestServer(t, authorizer, nil, nil)
+	return newTestServer(t, testServerConfig{authorizer: authorizer})
 }
 
-func newTestServer(t *testing.T, authorizer nanoca.Authorizer, issuerOverride nanoca.CertificateIssuer, observerOverride nanoca.IssuanceObserver, extraVerifiers ...nanoca.AttestationVerifier) (*httptest.Server, *nanoca.CA) {
+// testServerConfig overrides newTestServer's defaults; a zero field keeps
+// the discarded logs, null authorizer, in-process issuer, mock observer,
+// and in-memory storage.
+type testServerConfig struct {
+	logger     *slog.Logger
+	authorizer nanoca.Authorizer
+	issuer     nanoca.CertificateIssuer
+	observer   nanoca.IssuanceObserver
+	storage    nanoca.Storage
+	opts       []nanoca.Option
+	verifiers  []nanoca.AttestationVerifier
+}
+
+func newTestServer(t *testing.T, cfg testServerConfig) (*httptest.Server, *nanoca.CA) {
 	t.Helper()
 
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -265,12 +278,26 @@ func newTestServer(t *testing.T, authorizer nanoca.Authorizer, issuerOverride na
 		t.Fatalf("Failed to parse intermediate CA certificate: %v", err)
 	}
 
-	storage, err := store.New(store.Options{InMemory: true})
-	if err != nil {
-		t.Fatalf("Failed to create in-memory storage: %v", err)
+	logger := cfg.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 
-	issuer := issuerOverride
+	authorizer := cfg.authorizer
+	if authorizer == nil {
+		authorizer = nullauthorizer.New()
+	}
+
+	storage := cfg.storage
+	if storage == nil {
+		s, err := store.New(store.Options{InMemory: true})
+		if err != nil {
+			t.Fatalf("Failed to create in-memory storage: %v", err)
+		}
+		storage = s
+	}
+
+	issuer := cfg.issuer
 	if issuer == nil {
 		inproc, err := inprocess.New(intermKey, intermCert, caCert)
 		if err != nil {
@@ -279,18 +306,19 @@ func newTestServer(t *testing.T, authorizer nanoca.Authorizer, issuerOverride na
 		issuer = inproc
 	}
 
-	observer := observerOverride
+	observer := cfg.observer
 	if observer == nil {
 		observer = &mockIssuanceObserver{}
 	}
 
 	opts := []nanoca.Option{nanoca.WithObserver(observer), nanoca.WithVerifier(null.New())}
-	for _, v := range extraVerifiers {
+	for _, v := range cfg.verifiers {
 		opts = append(opts, nanoca.WithVerifier(v))
 	}
+	opts = append(opts, cfg.opts...)
 
 	ca, err := nanoca.New(
-		slog.New(slog.DiscardHandler),
+		logger,
 		issuer,
 		authorizer,
 		storage,

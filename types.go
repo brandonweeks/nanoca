@@ -54,9 +54,11 @@ type HardwareModule struct {
 // certificate response is built by ServedChain, which omits the root.
 type Certificate struct {
 	*x509.Certificate `json:"-"`
-	Raw               []byte   `json:"raw"`
-	SerialNumber      string   `json:"serialNumber"`
-	ChainRaw          [][]byte `json:"chainRaw,omitempty"`
+	// ID is the storage and URL identifier; the CA sets it to the order ID.
+	ID           string   `json:"id"`
+	Raw          []byte   `json:"raw"`
+	SerialNumber string   `json:"serialNumber"`
+	ChainRaw     [][]byte `json:"chainRaw,omitempty"`
 }
 
 // ServedChain returns the DER certificates for the ACME certificate response:
@@ -109,14 +111,14 @@ type Nonce struct {
 }
 
 type Account struct {
-	ID                   string           `json:"id"`                      // Include in storage
-	Key                  *jose.JSONWebKey `json:"key,omitempty"`           // Include in storage
-	KeyThumbprint        string           `json:"keyThumbprint,omitempty"` // Include in storage
+	ID                   string           `json:"id"`
+	Key                  *jose.JSONWebKey `json:"key,omitempty"`
+	KeyThumbprint        string           `json:"keyThumbprint,omitempty"`
 	Status               string           `json:"status"`
 	Contact              []string         `json:"contact,omitempty"`
 	TermsOfServiceAgreed bool             `json:"termsOfServiceAgreed,omitempty"`
 	Orders               string           `json:"orders,omitempty"`
-	CreatedAt            time.Time        `json:"createdAt"` // Include in storage
+	CreatedAt            time.Time        `json:"createdAt"`
 }
 
 type AccountRequest struct {
@@ -128,6 +130,22 @@ type AccountRequest struct {
 type Identifier struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
+}
+
+// Reservation marks a record as exclusively held by one in-flight operation.
+// It is persisted by storage but scrubbed from ACME responses; a reservation
+// older than the configured lease was abandoned by a crashed holder and may
+// be reclaimed.
+type Reservation struct {
+	Token      string    `json:"token"`
+	ReservedAt time.Time `json:"reservedAt"`
+}
+
+// Live reports whether the reservation is still honored under lease. A nil
+// reservation on a processing record counts as expired so a malformed
+// record can be reclaimed rather than wedged.
+func (r *Reservation) Live(lease time.Duration) bool {
+	return r != nil && time.Since(r.ReservedAt) <= lease
 }
 
 type Order struct {
@@ -143,6 +161,7 @@ type Order struct {
 	Certificate    string       `json:"certificate,omitempty"`
 	AccountID      string       `json:"accountId"`
 	CreatedAt      time.Time    `json:"createdAt"`
+	Reservation    *Reservation `json:"reservation,omitempty"`
 }
 
 type OrderRequest struct {
@@ -187,8 +206,12 @@ type Challenge struct {
 	ID        string     `json:"id"`
 	AuthzID   string     `json:"authzId"`
 	CreatedAt time.Time  `json:"createdAt"`
-	// Device attestation specific fields
-	Attestation map[string]any `json:"attestation,omitempty"`
+	// Attestation holds the raw CBOR attestation object from the validated
+	// challenge response, verbatim: finalize re-verifies it, and a decoded
+	// copy would not survive storage serialization intact (CBOR byte
+	// strings do not round-trip through JSON).
+	Attestation []byte       `json:"attestation,omitempty"`
+	Reservation *Reservation `json:"reservation,omitempty"`
 }
 
 type ChallengeRequest struct {

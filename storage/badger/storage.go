@@ -89,35 +89,114 @@ func (s *Storage) CreateNonce(_ context.Context, nonce *nanoca.Nonce) error {
 	})
 }
 
+// update retries fn when badger's optimistic concurrency detects a
+// conflicting commit; our write transactions are small read-then-write ops
+// for which a retry is always safe.
+func (s *Storage) update(fn func(txn *badger.Txn) error) error {
+	for {
+		err := s.db.Update(fn)
+		if !errors.Is(err, badger.ErrConflict) {
+			return err
+		}
+	}
+}
+
+// getValue loads a key's value, mapping a missing key to nanoca.ErrNotFound.
+func getValue(txn *badger.Txn, key []byte, resource string) ([]byte, error) {
+	item, err := txn.Get(key)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil, nanoca.ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to get %s: %w", resource, err)
+	}
+	return item.ValueCopy(nil)
+}
+
+func getJSON(txn *badger.Txn, key []byte, resource string, dst any) error {
+	data, err := getValue(txn, key, resource)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, dst); err != nil {
+		return fmt.Errorf("failed to unmarshal %s: %w", resource, err)
+	}
+	return nil
+}
+
+func setJSON(txn *badger.Txn, key []byte, resource string, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("failed to marshal %s: %w", resource, err)
+	}
+	return txn.Set(key, data)
+}
+
+// reservedRecord points at the status and reservation fields the
+// reserve/fence state machine manipulates, so orders and challenges share
+// one implementation of its transitions.
+type reservedRecord struct {
+	status      *string
+	reservation **nanoca.Reservation
+	resource    string
+	processing  string
+}
+
+func orderRecord(o *nanoca.Order) reservedRecord {
+	return reservedRecord{&o.Status, &o.Reservation, "order", nanoca.OrderStatusProcessing}
+}
+
+func challengeRecord(c *nanoca.Challenge) reservedRecord {
+	return reservedRecord{&c.Status, &c.Reservation, "challenge", nanoca.ChallengeStatusProcessing}
+}
+
+// reserve transitions the record from `from` to processing — or reclaims a
+// processing record whose reservation has lapsed — recording token and the
+// reservation time.
+func (r reservedRecord) reserve(from, token string, lease time.Duration) error {
+	switch {
+	case *r.status == from:
+	case *r.status == r.processing && !(*r.reservation).Live(lease):
+	case *r.status == r.processing:
+		return fmt.Errorf("%s is already reserved: %w", r.resource, nanoca.ErrReserved)
+	default:
+		return fmt.Errorf("%s status is %s, not %s: %w", r.resource, *r.status, from, nanoca.ErrStatusMismatch)
+	}
+
+	*r.status = r.processing
+	*r.reservation = &nanoca.Reservation{Token: token, ReservedAt: time.Now()}
+	return nil
+}
+
+// fence admits a write only from the reservation's holder and clears the
+// reservation; the caller sets the resulting status.
+func (r reservedRecord) fence(token string) error {
+	if *r.status != r.processing {
+		return fmt.Errorf("%s status is %s, not %s: %w", r.resource, *r.status, r.processing, nanoca.ErrStatusMismatch)
+	}
+	if *r.reservation == nil || (*r.reservation).Token != token {
+		return fmt.Errorf("%s reservation is held by another token: %w", r.resource, nanoca.ErrReserved)
+	}
+	*r.reservation = nil
+	return nil
+}
+
 // ConsumeNonce atomically validates and consumes a nonce, preventing race conditions
 func (s *Storage) ConsumeNonce(_ context.Context, value string, expiry time.Duration) (*nanoca.Nonce, error) {
 	var nonce nanoca.Nonce
 
-	err := s.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(nonceKey(value))
-		if err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return nanoca.ErrNonceNotFound
-			}
-			return fmt.Errorf("failed to get nonce: %w", err)
+	// The nonce is deleted even when expired; reporting expiry from inside
+	// the transaction would roll back the delete and keep the nonce forever.
+	err := s.update(func(txn *badger.Txn) error {
+		if err := getJSON(txn, nonceKey(value), "nonce", &nonce); err != nil {
+			return err
 		}
-
-		err = item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &nonce)
-		})
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal nonce: %w", err)
-		}
-
 		return txn.Delete(nonceKey(value))
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Expiry is reported only after the transaction commits: returning the
-	// error from inside it would roll back the delete and keep the expired
-	// nonce forever (nonce keys carry no TTL).
 	if time.Since(nonce.CreatedAt) > expiry {
 		return nil, nanoca.ErrNonceExpired
 	}
@@ -143,7 +222,18 @@ func putAccount(txn *badger.Txn, account *nanoca.Account) error {
 }
 
 func (s *Storage) CreateAccount(_ context.Context, account *nanoca.Account) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	// A concurrent registration of the same key surfaces as a conflict; the
+	// retry re-reads the thumbprint index and returns ErrAccountExists.
+	return s.update(func(txn *badger.Txn) error {
+		if account.KeyThumbprint != "" {
+			switch _, err := txn.Get(accountKeyLookupKey(account.KeyThumbprint)); {
+			case err == nil:
+				return nanoca.ErrAccountExists
+			case !errors.Is(err, badger.ErrKeyNotFound):
+				return fmt.Errorf("failed to get account key index: %w", err)
+			}
+		}
+
 		return putAccount(txn, account)
 	})
 }
@@ -152,20 +242,10 @@ func (s *Storage) GetAccount(_ context.Context, id string) (*nanoca.Account, err
 	var account nanoca.Account
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(accountKey(id))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &account)
-		})
+		return getJSON(txn, accountKey(id), "account", &account)
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("account not found")
-		}
-		return nil, fmt.Errorf("failed to get account: %w", err)
+		return nil, err
 	}
 
 	return &account, nil
@@ -175,32 +255,37 @@ func (s *Storage) GetAccountByKey(ctx context.Context, keyThumbprint string) (*n
 	var accountID string
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(accountKeyLookupKey(keyThumbprint))
+		val, err := getValue(txn, accountKeyLookupKey(keyThumbprint), "account key index")
 		if err != nil {
 			return err
 		}
-
-		return item.Value(func(val []byte) error {
-			accountID = string(val)
-			return nil
-		})
+		accountID = string(val)
+		return nil
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("account not found")
-		}
-		return nil, fmt.Errorf("failed to lookup account by key: %w", err)
+		return nil, err
 	}
 
 	return s.GetAccount(ctx, accountID)
 }
 
-func (s *Storage) UpdateAccount(ctx context.Context, account *nanoca.Account) error {
-	if _, err := s.GetAccount(ctx, account.ID); err != nil {
-		return errors.New("account not found")
+// requireKey ensures a record exists before it is overwritten, without
+// reading its value.
+func requireKey(txn *badger.Txn, key []byte, resource string) error {
+	if _, err := txn.Get(key); err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nanoca.ErrNotFound
+		}
+		return fmt.Errorf("failed to get %s: %w", resource, err)
 	}
+	return nil
+}
 
-	return s.db.Update(func(txn *badger.Txn) error {
+func (s *Storage) UpdateAccount(_ context.Context, account *nanoca.Account) error {
+	return s.update(func(txn *badger.Txn) error {
+		if err := requireKey(txn, accountKey(account.ID), "account"); err != nil {
+			return err
+		}
 		return putAccount(txn, account)
 	})
 }
@@ -220,38 +305,56 @@ func (s *Storage) GetOrder(_ context.Context, id string) (*nanoca.Order, error) 
 	var order nanoca.Order
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(orderKey(id))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &order)
-		})
+		return getJSON(txn, orderKey(id), "order", &order)
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("order not found")
-		}
-		return nil, fmt.Errorf("failed to get order: %w", err)
+		return nil, err
 	}
 
 	return &order, nil
 }
 
-func (s *Storage) UpdateOrder(ctx context.Context, order *nanoca.Order) error {
-	_, err := s.GetOrder(ctx, order.ID)
-	if err != nil {
-		return errors.New("order not found")
-	}
+func (s *Storage) SetOrderStatus(_ context.Context, id, from, to string) error {
+	return s.update(func(txn *badger.Txn) error {
+		var order nanoca.Order
+		if err := getJSON(txn, orderKey(id), "order", &order); err != nil {
+			return err
+		}
 
-	data, err := json.Marshal(order)
-	if err != nil {
-		return fmt.Errorf("failed to marshal order: %w", err)
-	}
+		if order.Status != from {
+			return fmt.Errorf("order status is %s, not %s: %w", order.Status, from, nanoca.ErrStatusMismatch)
+		}
+		order.Status = to
 
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(orderKey(order.ID), data)
+		return setJSON(txn, orderKey(id), "order", &order)
+	})
+}
+
+func (s *Storage) ReserveOrderFinalize(_ context.Context, id, token string, lease time.Duration) error {
+	return s.update(func(txn *badger.Txn) error {
+		var order nanoca.Order
+		if err := getJSON(txn, orderKey(id), "order", &order); err != nil {
+			return err
+		}
+		if err := orderRecord(&order).reserve(nanoca.OrderStatusReady, token, lease); err != nil {
+			return err
+		}
+		return setJSON(txn, orderKey(id), "order", &order)
+	})
+}
+
+func (s *Storage) ReleaseOrderFinalize(_ context.Context, id, token, to string) error {
+	return s.update(func(txn *badger.Txn) error {
+		var order nanoca.Order
+		if err := getJSON(txn, orderKey(id), "order", &order); err != nil {
+			return err
+		}
+		if err := orderRecord(&order).fence(token); err != nil {
+			return err
+		}
+		order.Status = to
+
+		return setJSON(txn, orderKey(id), "order", &order)
 	})
 }
 
@@ -305,38 +408,25 @@ func (s *Storage) GetAuthorization(_ context.Context, id string) (*nanoca.Author
 	var authz nanoca.Authorization
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(authzKey(id))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &authz)
-		})
+		return getJSON(txn, authzKey(id), "authorization", &authz)
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("authorization not found")
-		}
-		return nil, fmt.Errorf("failed to get authorization: %w", err)
+		return nil, err
 	}
 
 	return &authz, nil
 }
 
-func (s *Storage) UpdateAuthorization(ctx context.Context, authz *nanoca.Authorization) error {
-	_, err := s.GetAuthorization(ctx, authz.ID)
-	if err != nil {
-		return errors.New("authorization not found")
-	}
-
-	data, err := json.Marshal(authz)
-	if err != nil {
-		return fmt.Errorf("failed to marshal authorization: %w", err)
-	}
-
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(authzKey(authz.ID), data)
+func (s *Storage) SettleAuthorization(_ context.Context, authz *nanoca.Authorization) error {
+	return s.update(func(txn *badger.Txn) error {
+		var stored nanoca.Authorization
+		if err := getJSON(txn, authzKey(authz.ID), "authorization", &stored); err != nil {
+			return err
+		}
+		if stored.Status != nanoca.AuthzStatusPending {
+			return fmt.Errorf("authorization status is %s, not %s: %w", stored.Status, nanoca.AuthzStatusPending, nanoca.ErrStatusMismatch)
+		}
+		return setJSON(txn, authzKey(authz.ID), "authorization", authz)
 	})
 }
 
@@ -355,66 +445,45 @@ func (s *Storage) GetChallenge(_ context.Context, id string) (*nanoca.Challenge,
 	var challenge nanoca.Challenge
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(challengeKey(id))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &challenge)
-		})
+		return getJSON(txn, challengeKey(id), "challenge", &challenge)
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("challenge not found")
-		}
-		return nil, fmt.Errorf("failed to get challenge: %w", err)
+		return nil, err
 	}
 
 	return &challenge, nil
 }
 
-func (s *Storage) updateChallengeStatus(id, expectedStatus string, updateFn func(*nanoca.Challenge)) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(challengeKey(id))
-		if err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				return errors.New("challenge not found")
-			}
-			return fmt.Errorf("failed to get challenge: %w", err)
-		}
-
+func (s *Storage) ReserveChallengeValidation(_ context.Context, id, reservationToken string, lease time.Duration) error {
+	return s.update(func(txn *badger.Txn) error {
 		var challenge nanoca.Challenge
-		err = item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &challenge)
-		})
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal challenge: %w", err)
+		if err := getJSON(txn, challengeKey(id), "challenge", &challenge); err != nil {
+			return err
 		}
-
-		if challenge.Status != expectedStatus {
-			return fmt.Errorf("challenge status mismatch: expected %s, got %s", expectedStatus, challenge.Status)
+		if err := challengeRecord(&challenge).reserve(nanoca.ChallengeStatusPending, reservationToken, lease); err != nil {
+			return err
 		}
+		return setJSON(txn, challengeKey(id), "challenge", &challenge)
+	})
+}
 
+func (s *Storage) settleChallenge(id, reservationToken string, updateFn func(*nanoca.Challenge)) error {
+	return s.update(func(txn *badger.Txn) error {
+		var challenge nanoca.Challenge
+		if err := getJSON(txn, challengeKey(id), "challenge", &challenge); err != nil {
+			return err
+		}
+		if err := challengeRecord(&challenge).fence(reservationToken); err != nil {
+			return err
+		}
 		updateFn(&challenge)
 
-		data, err := json.Marshal(challenge)
-		if err != nil {
-			return fmt.Errorf("failed to marshal challenge: %w", err)
-		}
-
-		return txn.Set(challengeKey(id), data)
+		return setJSON(txn, challengeKey(id), "challenge", &challenge)
 	})
 }
 
-func (s *Storage) SetChallengeProcessing(_ context.Context, id string) error {
-	return s.updateChallengeStatus(id, nanoca.ChallengeStatusPending, func(c *nanoca.Challenge) {
-		c.Status = nanoca.ChallengeStatusProcessing
-	})
-}
-
-func (s *Storage) SetChallengeValid(_ context.Context, id string, validated time.Time, attestation map[string]any) error {
-	return s.updateChallengeStatus(id, nanoca.ChallengeStatusProcessing, func(c *nanoca.Challenge) {
+func (s *Storage) SetChallengeValid(_ context.Context, id, reservationToken string, validated time.Time, attestation []byte) error {
+	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
 		c.Status = nanoca.ChallengeStatusValid
 		c.Validated = &validated
 		c.Attestation = attestation
@@ -422,22 +491,37 @@ func (s *Storage) SetChallengeValid(_ context.Context, id string, validated time
 	})
 }
 
-func (s *Storage) SetChallengeInvalid(_ context.Context, id string, validated time.Time, problem *nanoca.Problem) error {
-	return s.updateChallengeStatus(id, nanoca.ChallengeStatusProcessing, func(c *nanoca.Challenge) {
+func (s *Storage) SetChallengeInvalid(_ context.Context, id, reservationToken string, validated time.Time, problem *nanoca.Problem) error {
+	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
 		c.Status = nanoca.ChallengeStatusInvalid
 		c.Validated = &validated
 		c.Error = problem
 	})
 }
 
-func (s *Storage) CreateCertificate(_ context.Context, cert *nanoca.Certificate) error {
-	data, err := json.Marshal(cert)
-	if err != nil {
-		return fmt.Errorf("failed to marshal certificate: %w", err)
-	}
+func (s *Storage) ReleaseChallengeValidation(_ context.Context, id, reservationToken string) error {
+	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
+		c.Status = nanoca.ChallengeStatusPending
+	})
+}
 
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(certificateKey(cert.SerialNumber), data)
+func (s *Storage) CompleteOrder(_ context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+	completed := *order
+	completed.Reservation = nil
+
+	return s.update(func(txn *badger.Txn) error {
+		var stored nanoca.Order
+		if err := getJSON(txn, orderKey(order.ID), "order", &stored); err != nil {
+			return err
+		}
+		if err := orderRecord(&stored).fence(token); err != nil {
+			return err
+		}
+
+		if err := setJSON(txn, orderKey(order.ID), "order", &completed); err != nil {
+			return err
+		}
+		return setJSON(txn, certificateKey(cert.ID), "certificate", cert)
 	})
 }
 
@@ -445,32 +529,18 @@ func (s *Storage) GetCertificate(_ context.Context, id string) (*nanoca.Certific
 	var cert nanoca.Certificate
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(certificateKey(id))
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			if err := json.Unmarshal(val, &cert); err != nil {
-				return err
-			}
-
-			if len(cert.Raw) > 0 {
-				x509Cert, err := x509.ParseCertificate(cert.Raw)
-				if err != nil {
-					return fmt.Errorf("failed to parse certificate from raw bytes: %w", err)
-				}
-				cert.Certificate = x509Cert
-			}
-
-			return nil
-		})
+		return getJSON(txn, certificateKey(id), "certificate", &cert)
 	})
 	if err != nil {
-		if errors.Is(err, badger.ErrKeyNotFound) {
-			return nil, errors.New("certificate not found")
+		return nil, err
+	}
+
+	if len(cert.Raw) > 0 {
+		x509Cert, err := x509.ParseCertificate(cert.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse certificate from raw bytes: %w", err)
 		}
-		return nil, fmt.Errorf("failed to get certificate: %w", err)
+		cert.Certificate = x509Cert
 	}
 
 	return &cert, nil

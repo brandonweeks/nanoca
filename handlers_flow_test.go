@@ -27,11 +27,20 @@ func (d denyAuthorizer) Authorize(context.Context, *nanoca.DeviceInfo) (bool, er
 
 func newACMEClient(t *testing.T, ts *httptest.Server) *acme.Client {
 	t.Helper()
+	client := newUnregisteredClient(t, ts)
+	if _, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+	return client
+}
+
+func newUnregisteredClient(t *testing.T, ts *httptest.Server) *acme.Client {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
-	client := &acme.Client{
+	return &acme.Client{
 		DirectoryURL: ts.URL + "/directory",
 		HTTPClient:   ts.Client(),
 		Key:          key,
@@ -39,10 +48,6 @@ func newACMEClient(t *testing.T, ts *httptest.Server) *acme.Client {
 		// test context is cancelled; fail on the first response instead.
 		RetryBackoff: func(int, *http.Request, *http.Response) time.Duration { return -1 },
 	}
-	if _, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS); err != nil {
-		t.Fatalf("failed to register account: %v", err)
-	}
-	return client
 }
 
 func pendingChallenge(t *testing.T, client *acme.Client, value string) (*acme.Order, *acme.Challenge) {
@@ -130,6 +135,27 @@ func TestMalformedAttestations(t *testing.T) {
 				t.Error("Accept() error = nil, want error")
 			}
 		})
+	}
+}
+
+// Re-POSTing an already-validated challenge is a client-state condition, not
+// a backend failure: a 5xx tells the client to retry an operation that can
+// never succeed (see the RetryBackoff comment above).
+func TestChallengeDuplicateSubmission(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+	client := newACMEClient(t, ts)
+
+	_, chal := pendingChallenge(t, client, "duplicate-device")
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+
+	err := submitAttObj(t, client, chal, nullAttObj(t))
+	var ae *acme.Error
+	if errors.As(err, &ae) && ae.StatusCode >= http.StatusInternalServerError {
+		t.Errorf("duplicate challenge POST status = %d, want non-5xx", ae.StatusCode)
 	}
 }
 
@@ -236,8 +262,9 @@ func TestOrderBelongsToAnotherAccount(t *testing.T) {
 
 // createOrder builds challenges only for permanent-identifier and
 // hardware-module identifiers, so any other type yields an authorization
-// with zero challenges — an authorization that must never settle valid and
-// an order that must never be promoted, since nothing was ever validated.
+// with zero challenges. Over an empty challenge list every recompute reads
+// all-valid, so such an authorization must never settle valid — nothing was
+// ever validated — and its order must not be promoted toward issuance.
 func TestZeroChallengeAuthorizationNotSettledValid(t *testing.T) {
 	t.Parallel()
 

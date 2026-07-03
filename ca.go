@@ -18,9 +18,10 @@ type CA struct {
 	observers         []IssuanceObserver
 	verifiers         map[string]AttestationVerifier
 
-	baseURL     string
-	prefix      string
-	nonceExpiry time.Duration
+	baseURL          string
+	prefix           string
+	nonceExpiry      time.Duration
+	reservationLease time.Duration
 
 	storage Storage
 }
@@ -52,6 +53,16 @@ func WithPrefix(prefix string) Option {
 	}
 }
 
+// WithReservationLease sets how long a finalize or challenge-validation
+// reservation is honored before another request may reclaim it. It bounds
+// how long a crashed instance can hold an order or challenge in processing,
+// and must exceed the worst-case verifier, authorizer, and issuer latency.
+func WithReservationLease(d time.Duration) Option {
+	return func(ca *CA) {
+		ca.reservationLease = d
+	}
+}
+
 func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, storage Storage, baseURL string, opts ...Option) (*CA, error) {
 	if logger == nil {
 		return nil, errors.New("logger is required")
@@ -80,6 +91,7 @@ func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, s
 		storage:           storage,
 		baseURL:           baseURL,
 		nonceExpiry:       time.Hour,
+		reservationLease:  time.Minute,
 		verifiers:         make(map[string]AttestationVerifier),
 	}
 
@@ -89,6 +101,12 @@ func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, s
 
 	if len(ca.verifiers) == 0 {
 		return nil, errors.New("at least one attestation verifier must be registered")
+	}
+
+	// A nonpositive lease makes every reservation expired at birth, so
+	// concurrent finalizes would each reclaim the other's and both sign.
+	if ca.reservationLease <= 0 {
+		return nil, errors.New("reservation lease must be positive")
 	}
 
 	return ca, nil
