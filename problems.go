@@ -49,10 +49,19 @@ type Problem struct {
 	// RFC 8555 Section 6.2: "The problem document returned with the error MUST include an
 	// 'algorithms' field with an array of supported 'alg' values."
 	Algorithms []string `json:"algorithms,omitempty"`
+
+	// Cause is the underlying server-side error. It is logged alongside the
+	// problem but never serialized to the client.
+	Cause error `json:"-"`
 }
 
 func (p *Problem) Error() string {
 	return fmt.Sprintf("%s :: %s", p.Type, p.Detail)
+}
+
+func (p *Problem) WithCause(err error) *Problem {
+	p.Cause = err
+	return p
 }
 
 func InternalServerError(detail string) *Problem {
