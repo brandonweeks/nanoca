@@ -109,17 +109,17 @@ func (s *Storage) ConsumeNonce(_ context.Context, value string, expiry time.Dura
 			return fmt.Errorf("failed to unmarshal nonce: %w", err)
 		}
 
-		if time.Since(nonce.CreatedAt) > expiry {
-			if err := txn.Delete(nonceKey(value)); err != nil {
-				return fmt.Errorf("failed to delete expired nonce: %w", err)
-			}
-			return nanoca.ErrNonceExpired
-		}
-
 		return txn.Delete(nonceKey(value))
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Expiry is reported only after the transaction commits: returning the
+	// error from inside it would roll back the delete and keep the expired
+	// nonce forever (nonce keys carry no TTL).
+	if time.Since(nonce.CreatedAt) > expiry {
+		return nil, nanoca.ErrNonceExpired
 	}
 
 	return &nonce, nil
