@@ -7,6 +7,9 @@ import (
 
 type AttestationVerifier interface {
 	Format() string
+	// Verify returns the device identity the statement proves; the identity
+	// is what authorization and the certificate's SANs are built from, so a
+	// nil DeviceInfo with a nil error is treated as a failed attestation.
 	Verify(ctx context.Context, stmt AttestationStatement, challenge []byte) (*DeviceInfo, error)
 }
 
