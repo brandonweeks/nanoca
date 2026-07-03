@@ -244,5 +244,11 @@ type FinalizeRequest struct {
 
 type CertificateIssuer interface {
 	// The deviceInfos slice contains attestation-derived device information.
+	//
+	// An error that is (or wraps) a *Problem is returned to the client
+	// verbatim: BadCSR rejects the CSR but leaves the order ready for an
+	// amended retry, and any other sub-500 problem invalidates the order.
+	// A plain error is treated as transient: the client gets a
+	// serverInternal response and the order returns to ready.
 	IssueCertificate(ctx context.Context, csr *x509.CertificateRequest, deviceInfos []*DeviceInfo) (*Certificate, error)
 }
