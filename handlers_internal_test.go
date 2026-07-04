@@ -1,6 +1,7 @@
 package nanoca
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,31 @@ import (
 	"testing"
 	"time"
 )
+
+type orderStatusRecorder struct {
+	Storage
+	set bool
+}
+
+func (s *orderStatusRecorder) SetOrderStatus(context.Context, string, string, string) error {
+	s.set = true
+	return nil
+}
+
+// Over an empty authorization list every recompute reads all-valid, so an
+// order that somehow has none must never be promoted; nothing was ever
+// validated.
+func TestUpdateOrderStatusNoAuthorizations(t *testing.T) {
+	t.Parallel()
+
+	rec := &orderStatusRecorder{}
+	ca := &CA{logger: slog.New(slog.DiscardHandler), storage: rec}
+
+	ca.updateOrderStatus(t.Context(), &Order{ID: "o1", Status: OrderStatusPending})
+	if rec.set {
+		t.Error("updateOrderStatus promoted an order with no authorizations")
+	}
+}
 
 // Reservations and the stored attestation blob are storage concerns; they
 // must never reach the ACME wire format, and scrubbing them must not mutate
