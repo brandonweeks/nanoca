@@ -18,15 +18,15 @@ import (
 //     consumed nonce, and ErrNonceExpired after consuming an expired one.
 //   - CreateAccount must return ErrAccountExists, atomically with the
 //     write, if an account already exists with the same key thumbprint.
-//   - SetOrderStatus, SettleAuthorization, and the reserve/fenced methods
+//   - SetOrderStatus, SettleAuthorization, and the reservation methods
 //     below must return ErrStatusMismatch, atomically with the write, when
 //     the record is not in the expected preceding status.
 //   - Reserve* must return ErrReserved, atomically with the write, while
-//     an unexpired reservation is held; the fenced writes (CompleteOrder,
-//     ReleaseOrderFinalize, ReleaseChallengeValidation, SetChallengeValid,
-//     SetChallengeInvalid) must return ErrReserved when the presented token
-//     does not match the stored reservation. Successful fenced writes clear
-//     the reservation.
+//     an unexpired reservation is held; the writes that take a reservation
+//     token (CompleteOrder, ReleaseOrderFinalize, ReleaseChallengeValidation,
+//     SetChallengeValid, SetChallengeInvalid) must return ErrReserved when
+//     the presented token does not match the stored reservation, and clear
+//     the reservation on success.
 //
 // Reservation leases are judged by comparing the stored ReservedAt against
 // the caller-supplied duration with the backend's clock, so a shared
@@ -70,7 +70,7 @@ type Storage interface {
 	// ReleaseOrderFinalize surrenders a finalize reservation, transitioning
 	// the order from processing to `to` — ready, so a retry can finalize
 	// again, or invalid, for a terminal failure — and clearing the
-	// reservation. The write is fenced by token.
+	// reservation. The write requires the matching token.
 	ReleaseOrderFinalize(ctx context.Context, id, token, to string) error
 	GetOrdersByAccount(ctx context.Context, accountID string) ([]*Order, error)
 
@@ -92,22 +92,23 @@ type Storage interface {
 	ReserveChallengeValidation(ctx context.Context, id, reservationToken string, lease time.Duration) error
 	// ReleaseChallengeValidation surrenders a validation reservation,
 	// returning the challenge from processing to pending so a retry can
-	// validate again after a transient failure. The write is fenced by
-	// reservationToken.
+	// validate again after a transient failure. The write requires the
+	// matching reservationToken.
 	ReleaseChallengeValidation(ctx context.Context, id, reservationToken string) error
 	// SetChallengeValid stores the raw CBOR attestation object beside the
 	// status; it is opaque to storage and re-verified byte-for-byte at
-	// finalize. The write is fenced by reservationToken and clears the
-	// reservation.
+	// finalize. The write requires the matching reservationToken and clears
+	// the reservation.
 	SetChallengeValid(ctx context.Context, id, reservationToken string, validated time.Time, attestation []byte) error
 	SetChallengeInvalid(ctx context.Context, id, reservationToken string, validated time.Time, problem *Problem) error
 
 	// CompleteOrder atomically stores the certificate under Certificate.ID
 	// — the identifier GetCertificate looks up — and transitions the order
-	// from processing to valid, clearing its reservation; the write is
-	// fenced by token, so a finalize whose reservation was reclaimed cannot
-	// persist a certificate for a stale CSR. On error neither write is
-	// persisted, so a stored certificate always belongs to a valid order.
+	// from processing to valid, clearing its reservation; the write
+	// requires the matching token, so a finalize whose reservation was
+	// reclaimed cannot persist a certificate for a stale CSR. On error
+	// neither write is persisted, so a stored certificate always belongs
+	// to a valid order.
 	CompleteOrder(ctx context.Context, order *Order, cert *Certificate, token string) error
 	GetCertificate(ctx context.Context, id string) (*Certificate, error)
 

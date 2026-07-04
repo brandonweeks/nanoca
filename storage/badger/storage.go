@@ -133,7 +133,7 @@ func setJSON(txn *badger.Txn, key []byte, resource string, v any) error {
 }
 
 // reservedRecord points at the status and reservation fields the
-// reserve/fence state machine manipulates, so orders and challenges share
+// reservation state machine manipulates, so orders and challenges share
 // one implementation of its transitions.
 type reservedRecord struct {
 	status      *string
@@ -168,9 +168,9 @@ func (r reservedRecord) reserve(from, token string, lease time.Duration) error {
 	return nil
 }
 
-// fence admits a write only from the reservation's holder and clears the
+// consume admits a write only from the reservation's holder and clears the
 // reservation; the caller sets the resulting status.
-func (r reservedRecord) fence(token string) error {
+func (r reservedRecord) consume(token string) error {
 	if *r.status != r.processing {
 		return fmt.Errorf("%s status is %s, not %s: %w", r.resource, *r.status, r.processing, nanoca.ErrStatusMismatch)
 	}
@@ -349,7 +349,7 @@ func (s *Storage) ReleaseOrderFinalize(_ context.Context, id, token, to string) 
 		if err := getJSON(txn, orderKey(id), "order", &order); err != nil {
 			return err
 		}
-		if err := orderRecord(&order).fence(token); err != nil {
+		if err := orderRecord(&order).consume(token); err != nil {
 			return err
 		}
 		order.Status = to
@@ -473,7 +473,7 @@ func (s *Storage) settleChallenge(id, reservationToken string, updateFn func(*na
 		if err := getJSON(txn, challengeKey(id), "challenge", &challenge); err != nil {
 			return err
 		}
-		if err := challengeRecord(&challenge).fence(reservationToken); err != nil {
+		if err := challengeRecord(&challenge).consume(reservationToken); err != nil {
 			return err
 		}
 		updateFn(&challenge)
@@ -518,7 +518,7 @@ func (s *Storage) CompleteOrder(_ context.Context, order *nanoca.Order, cert *na
 		if err := getJSON(txn, orderKey(order.ID), "order", &stored); err != nil {
 			return err
 		}
-		if err := orderRecord(&stored).fence(token); err != nil {
+		if err := orderRecord(&stored).consume(token); err != nil {
 			return err
 		}
 
