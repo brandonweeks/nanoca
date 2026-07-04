@@ -178,6 +178,15 @@ const (
 	OrderStatusInvalid    = "invalid"
 )
 
+// presentLapsed rewrites a processing order whose reservation has lapsed
+// back to ready, the status a retry would reclaim it from. Presentation
+// only: the durable reclaim happens when the retry reserves.
+func (o *Order) presentLapsed(lease time.Duration) {
+	if o.Status == OrderStatusProcessing && !o.Reservation.Live(lease) {
+		o.Status = OrderStatusReady
+	}
+}
+
 const (
 	IdentifierTypePermanentIdentifier = "permanent-identifier"
 	IdentifierTypeHardwareModule      = "hardware-module"
@@ -233,6 +242,40 @@ const (
 	ChallengeStatusValid      = "valid"
 	ChallengeStatusInvalid    = "invalid"
 )
+
+// presentLapsed rewrites a processing challenge whose reservation has
+// lapsed back to pending, the status a retry would reclaim it from.
+// Presentation only: the durable reclaim happens when the retry reserves.
+func (c *Challenge) presentLapsed(lease time.Duration) {
+	if c.Status == ChallengeStatusProcessing && !c.Reservation.Live(lease) {
+		c.Status = ChallengeStatusPending
+	}
+}
+
+// The settle* helpers shape the record for SettleChallenge, which writes
+// it wholesale: each transition sets every settlement field so a call
+// site cannot persist a leftover from a prior state.
+
+func (c *Challenge) settleValid(validated time.Time, attestation []byte) {
+	c.Status = ChallengeStatusValid
+	c.Validated = &validated
+	c.Attestation = attestation
+	c.Error = nil
+}
+
+func (c *Challenge) settleInvalid(validated time.Time, problem *Problem) {
+	c.Status = ChallengeStatusInvalid
+	c.Validated = &validated
+	c.Attestation = nil
+	c.Error = problem
+}
+
+func (c *Challenge) settlePending() {
+	c.Status = ChallengeStatusPending
+	c.Validated = nil
+	c.Attestation = nil
+	c.Error = nil
+}
 
 const (
 	ChallengeTypeDeviceAttest01 = "device-attest-01"

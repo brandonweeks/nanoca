@@ -434,7 +434,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("SetChallengeValid", func(t *testing.T) {
+	t.Run("SettleChallenge valid", func(t *testing.T) {
 		t.Parallel()
 
 		storage := newTestStorage(t)
@@ -454,15 +454,18 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 		}
 
 		now := time.Now()
-		attestation := []byte("attestation-object")
+		settled := *challenge
+		settled.Status = nanoca.ChallengeStatusValid
+		settled.Validated = &now
+		settled.Attestation = []byte("attestation-object")
 
 		// a stale holder's token is rejected
-		if err := storage.SetChallengeValid(ctx, challenge.ID, "stale", now, attestation); !errors.Is(err, nanoca.ErrReserved) {
-			t.Errorf("SetChallengeValid(stale token) error = %v, want ErrReserved", err)
+		if err := storage.SettleChallenge(ctx, &settled, "stale"); !errors.Is(err, nanoca.ErrReserved) {
+			t.Errorf("SettleChallenge(stale token) error = %v, want ErrReserved", err)
 		}
 
-		if err := storage.SetChallengeValid(ctx, challenge.ID, "t1", now, attestation); err != nil {
-			t.Fatalf("SetChallengeValid() error = %v", err)
+		if err := storage.SettleChallenge(ctx, &settled, "t1"); err != nil {
+			t.Fatalf("SettleChallenge() error = %v", err)
 		}
 
 		retrieved, err := storage.GetChallenge(ctx, challenge.ID)
@@ -485,18 +488,18 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			t.Error("Reservation should be cleared by the terminal write")
 		}
 
-		// calling on a valid challenge should fail (expects processing)
-		if err := storage.SetChallengeValid(ctx, challenge.ID, "t1", now, nil); err == nil {
-			t.Error("SetChallengeValid() should fail when status is not processing")
+		// settling a valid challenge should fail (expects processing)
+		if err := storage.SettleChallenge(ctx, &settled, "t1"); err == nil {
+			t.Error("SettleChallenge() should fail when status is not processing")
 		}
 
 		// nonexistent challenge
-		if err := storage.SetChallengeValid(ctx, "nonexistent", "t1", now, nil); err == nil {
-			t.Error("SetChallengeValid() should fail for nonexistent challenge")
+		if err := storage.SettleChallenge(ctx, &nanoca.Challenge{ID: "nonexistent"}, "t1"); err == nil {
+			t.Error("SettleChallenge() should fail for nonexistent challenge")
 		}
 	})
 
-	t.Run("SetChallengeInvalid", func(t *testing.T) {
+	t.Run("SettleChallenge invalid", func(t *testing.T) {
 		t.Parallel()
 
 		storage := newTestStorage(t)
@@ -516,14 +519,17 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 		}
 
 		now := time.Now()
-		prob := nanoca.Unauthorized("device not authorized")
+		settled := *challenge
+		settled.Status = nanoca.ChallengeStatusInvalid
+		settled.Validated = &now
+		settled.Error = nanoca.Unauthorized("device not authorized")
 
-		if err := storage.SetChallengeInvalid(ctx, challenge.ID, "stale", now, prob); !errors.Is(err, nanoca.ErrReserved) {
-			t.Errorf("SetChallengeInvalid(stale token) error = %v, want ErrReserved", err)
+		if err := storage.SettleChallenge(ctx, &settled, "stale"); !errors.Is(err, nanoca.ErrReserved) {
+			t.Errorf("SettleChallenge(stale token) error = %v, want ErrReserved", err)
 		}
 
-		if err := storage.SetChallengeInvalid(ctx, challenge.ID, "t1", now, prob); err != nil {
-			t.Fatalf("SetChallengeInvalid() error = %v", err)
+		if err := storage.SettleChallenge(ctx, &settled, "t1"); err != nil {
+			t.Fatalf("SettleChallenge() error = %v", err)
 		}
 
 		retrieved, err := storage.GetChallenge(ctx, challenge.ID)
@@ -543,14 +549,9 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			t.Error("Reservation should be cleared by the terminal write")
 		}
 
-		// calling on an invalid challenge should fail (expects processing)
-		if err := storage.SetChallengeInvalid(ctx, challenge.ID, "t1", now, prob); err == nil {
-			t.Error("SetChallengeInvalid() should fail when status is not processing")
-		}
-
-		// nonexistent challenge
-		if err := storage.SetChallengeInvalid(ctx, "nonexistent", "t1", now, prob); err == nil {
-			t.Error("SetChallengeInvalid() should fail for nonexistent challenge")
+		// settling an invalid challenge should fail (expects processing)
+		if err := storage.SettleChallenge(ctx, &settled, "t1"); err == nil {
+			t.Error("SettleChallenge() should fail when status is not processing")
 		}
 	})
 }
@@ -738,27 +739,28 @@ func TestReleaseOrderFinalize(t *testing.T) {
 	}
 }
 
-func TestReleaseChallengeValidation(t *testing.T) {
+func TestSettleChallengeToPending(t *testing.T) {
 	t.Parallel()
 
 	storage := newTestStorage(t)
 	ctx := t.Context()
 
-	if err := storage.CreateChallenge(ctx, &nanoca.Challenge{ID: "c1", Status: nanoca.ChallengeStatusPending}); err != nil {
+	pending := &nanoca.Challenge{ID: "c1", Status: nanoca.ChallengeStatusPending}
+	if err := storage.CreateChallenge(ctx, pending); err != nil {
 		t.Fatalf("CreateChallenge() error = %v", err)
 	}
-	if err := storage.ReleaseChallengeValidation(ctx, "c1", "t1"); !errors.Is(err, nanoca.ErrStatusMismatch) {
-		t.Errorf("ReleaseChallengeValidation(pending) error = %v, want ErrStatusMismatch", err)
+	if err := storage.SettleChallenge(ctx, pending, "t1"); !errors.Is(err, nanoca.ErrStatusMismatch) {
+		t.Errorf("SettleChallenge(pending) error = %v, want ErrStatusMismatch", err)
 	}
 
 	if err := storage.ReserveChallengeValidation(ctx, "c1", "t1", time.Minute); err != nil {
 		t.Fatalf("ReserveChallengeValidation() error = %v", err)
 	}
-	if err := storage.ReleaseChallengeValidation(ctx, "c1", "stale"); !errors.Is(err, nanoca.ErrReserved) {
-		t.Errorf("ReleaseChallengeValidation(stale token) error = %v, want ErrReserved", err)
+	if err := storage.SettleChallenge(ctx, pending, "stale"); !errors.Is(err, nanoca.ErrReserved) {
+		t.Errorf("SettleChallenge(stale token) error = %v, want ErrReserved", err)
 	}
-	if err := storage.ReleaseChallengeValidation(ctx, "c1", "t1"); err != nil {
-		t.Fatalf("ReleaseChallengeValidation() error = %v", err)
+	if err := storage.SettleChallenge(ctx, pending, "t1"); err != nil {
+		t.Fatalf("SettleChallenge() error = %v", err)
 	}
 
 	challenge, err := storage.GetChallenge(ctx, "c1")
@@ -769,7 +771,7 @@ func TestReleaseChallengeValidation(t *testing.T) {
 		t.Errorf("challenge status = %q, want %q", challenge.Status, nanoca.ChallengeStatusPending)
 	}
 	if challenge.Reservation != nil {
-		t.Error("Reservation should be cleared by release")
+		t.Error("Reservation should be cleared by settling back to pending")
 	}
 }
 
