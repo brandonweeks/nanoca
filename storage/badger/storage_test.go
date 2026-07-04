@@ -606,7 +606,9 @@ func TestStorage_CompleteOrder(t *testing.T) {
 	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
-	order := &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusValid}
+	// Deliberately not pre-set to valid: CompleteOrder owns the
+	// processing-to-valid transition.
+	order := &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusProcessing}
 	cert := &nanoca.Certificate{ID: "o1", SerialNumber: "1"}
 
 	// Completion requires a reserved (processing) order.
