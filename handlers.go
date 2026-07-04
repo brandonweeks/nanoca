@@ -43,11 +43,11 @@ func lookupProblem(err error, resource string) *Problem {
 	return InternalServerError("Failed to get " + strings.ToLower(resource)).WithCause(err)
 }
 
-// isFenceRejection reports whether a guarded or fenced storage write was
+// lostRace reports whether a conditional storage write was
 // rejected because another request has settled the record; the winner's
 // result stands. Missing either sentinel would misread a lost race as a
 // backend failure.
-func isFenceRejection(err error) bool {
+func lostRace(err error) bool {
 	return errors.Is(err, ErrReserved) || errors.Is(err, ErrStatusMismatch)
 }
 
@@ -862,7 +862,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	// a retry once the lease lapses.
 	reservationToken := randomID(16)
 	if err := ca.storage.ReserveChallengeValidation(ctx, challenge.ID, reservationToken, ca.reservationLease); err != nil {
-		if isFenceRejection(err) {
+		if lostRace(err) {
 			ca.reportChallengeState(ctx, w, challenge.ID)
 			return
 		}
@@ -894,10 +894,10 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		// the attestation; surrender the reservation so a retry can
 		// validate once it clears, instead of invalidating the challenge.
 		if releaseErr := ca.storage.ReleaseChallengeValidation(ctx, challenge.ID, reservationToken); releaseErr != nil {
-			// A fencing rejection means another request settled the
+			// A lost race means another request settled the
 			// challenge; its result stands. Anything else leaves the
 			// challenge processing, and it heals by lease expiry.
-			if !isFenceRejection(releaseErr) {
+			if !lostRace(releaseErr) {
 				ca.logger.ErrorContext(ctx, "Failed to release challenge after authorization error", "error", releaseErr)
 			}
 		}
@@ -915,7 +915,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	now := time.Now()
 	if err := ca.storage.SetChallengeValid(ctx, challenge.ID, reservationToken, now, attObjBytes); err != nil {
 		// Another writer settled the challenge first; report its result.
-		if isFenceRejection(err) {
+		if lostRace(err) {
 			ca.reportChallengeState(ctx, w, challenge.ID)
 			return
 		}
@@ -954,11 +954,11 @@ func (ca *CA) reportChallengeState(ctx context.Context, w http.ResponseWriter, c
 }
 
 // failChallenge settles a reserved challenge as invalid and reports prob. A
-// fencing rejection means another request settled the challenge first: its
+// lost race means another request settled the challenge first: its
 // result is reported instead and the recompute is left to it.
 func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challenge *Challenge, reservationToken string, prob *Problem) {
 	if err := ca.storage.SetChallengeInvalid(ctx, challenge.ID, reservationToken, time.Now(), prob); err != nil {
-		if isFenceRejection(err) {
+		if lostRace(err) {
 			ca.reportChallengeState(ctx, w, challenge.ID)
 			return
 		}
@@ -1231,12 +1231,12 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 	order.Reservation = nil
 	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
 		ca.logger.ErrorContext(ctx, "Discarding signed certificate after failed completion", "serial_number", cert.SerialNumber, "error", err)
-		// A fencing rejection means the lease lapsed and another finalize
+		// A lost race means the lease lapsed and another finalize
 		// reclaimed the order; its outcome stands and there is no
 		// reservation left to release. That is a client-state condition
 		// like losing the reserve itself, not a backend failure: a 5xx
 		// would invite a retry of a finalize that has been superseded.
-		if isFenceRejection(err) {
+		if lostRace(err) {
 			return nil, nil, OrderNotReady("Order finalization was superseded by another request")
 		}
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to complete order: %w", err))
@@ -1259,7 +1259,7 @@ func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) e
 	}
 	switch serr := ca.storage.ReleaseOrderFinalize(ctx, orderID, token, to); {
 	case serr == nil:
-	case isFenceRejection(serr):
+	case lostRace(serr):
 		// The lease lapsed and another finalize took over; its outcome
 		// stands.
 		ca.logger.DebugContext(ctx, "Finalize reservation was reclaimed", "error", serr)

@@ -89,7 +89,7 @@ func (s *authzWriteParkingStorage) SettleAuthorization(ctx context.Context, auth
 	return s.Storage.SettleAuthorization(ctx, authz)
 }
 
-// A zombie validation whose fenced SetChallengeInvalid is rejected has no
+// A zombie validation whose SetChallengeInvalid write is rejected has no
 // claim left on the challenge, yet it still recomputes the authorization.
 // Its stale write must not revert an authorization a reclaiming retry has
 // settled valid: with the order already ready, a reverted authorization is
@@ -133,9 +133,9 @@ func TestZombieInvalidationDoesNotRevertSettledAuthz(t *testing.T) {
 	<-verifier.entered[1]
 
 	// The zombie fails verification while the retry holds the reservation,
-	// so its fenced SetChallengeInvalid is rejected. If it goes on to
+	// so its SetChallengeInvalid write is rejected. If it goes on to
 	// recompute the authorization anyway, its stale write parks; if it
-	// stops at the fencing rejection, it finishes without writing.
+	// stops at the rejected write, it finishes without writing.
 	storage.park(1)
 	close(verifier.release[0])
 	var gate chan struct{}
@@ -342,7 +342,7 @@ func TestOrderReadyRetriesAfterStatusWriteFailure(t *testing.T) {
 }
 
 // challengeInvalidFailingStorage fails SetChallengeInvalid with a plain
-// backend error while armed, so failChallenge takes its non-fencing branch
+// backend error while armed, so failChallenge takes its backend-error branch
 // and never learns another request has claimed the challenge.
 type challengeInvalidFailingStorage struct {
 	nanoca.Storage
@@ -366,11 +366,11 @@ func (s *challengeInvalidFailingStorage) SetChallengeInvalid(ctx context.Context
 	return s.Storage.SetChallengeInvalid(ctx, id, reservationToken, validated, problem)
 }
 
-// A zombie can also lose its claim without being told: when its fenced
-// SetChallengeInvalid fails with a backend error instead of a fencing
+// A zombie can also lose its claim without being told: when its
+// SetChallengeInvalid fails with a backend error instead of a token
 // rejection, it goes on to recompute the authorization from reads taken
 // before the reclaiming retry settled. That stale write must not revert
-// the settled authorization any more than the fencing-rejection variant
+// the settled authorization any more than the token-rejection variant
 // (TestZombieInvalidationDoesNotRevertSettledAuthz) may.
 func TestZombieBackendErrorDoesNotRevertSettledAuthz(t *testing.T) {
 	t.Parallel()
@@ -411,7 +411,7 @@ func TestZombieBackendErrorDoesNotRevertSettledAuthz(t *testing.T) {
 	<-verifier.entered[1]
 
 	// The zombie fails verification while the retry holds the reservation,
-	// but its SetChallengeInvalid reports a backend error, not the fencing
+	// but its SetChallengeInvalid reports a backend error, not the token
 	// rejection. If it recomputes the authorization anyway, its stale
 	// write parks; if it treats the lost claim as settled, it finishes
 	// without writing.

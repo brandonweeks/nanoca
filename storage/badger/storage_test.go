@@ -456,7 +456,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 		now := time.Now()
 		attestation := []byte("attestation-object")
 
-		// the write is fenced: a stale holder's token is rejected
+		// a stale holder's token is rejected
 		if err := storage.SetChallengeValid(ctx, challenge.ID, "stale", now, attestation); !errors.Is(err, nanoca.ErrReserved) {
 			t.Errorf("SetChallengeValid(stale token) error = %v, want ErrReserved", err)
 		}

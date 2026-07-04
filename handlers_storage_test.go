@@ -1249,7 +1249,7 @@ func TestSettledAuthorizationOmitsAttestation(t *testing.T) {
 }
 
 // completeOrderRacedStorage simulates a zombie finalize whose lease lapsed
-// mid-issuance: by the time its fenced completion lands, a retry has
+// mid-issuance: by the time its CompleteOrder write lands, a retry has
 // reclaimed the reservation, so the write reports ErrReserved.
 type completeOrderRacedStorage struct {
 	nanoca.Storage
