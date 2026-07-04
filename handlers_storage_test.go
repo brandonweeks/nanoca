@@ -604,8 +604,13 @@ type corruptAttestationStorage struct {
 	nanoca.Storage
 }
 
-func (s corruptAttestationStorage) SetChallengeValid(ctx context.Context, id, reservationToken string, validated time.Time, attestation []byte) error {
-	return s.Storage.SetChallengeValid(ctx, id, reservationToken, validated, attestation[:1])
+func (s corruptAttestationStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+	if len(challenge.Attestation) > 0 {
+		truncated := *challenge
+		truncated.Attestation = challenge.Attestation[:1]
+		return s.Storage.SettleChallenge(ctx, &truncated, reservationToken)
+	}
+	return s.Storage.SettleChallenge(ctx, challenge, reservationToken)
 }
 
 // An order whose stored attestation can never be re-verified is stuck: a
@@ -890,7 +895,7 @@ func TestFinalizeRecoversAfterRollbackFailure(t *testing.T) {
 	}
 }
 
-// challengeValidFailingOnceStorage fails the first SetChallengeValid,
+// challengeValidFailingOnceStorage fails the first valid settlement,
 // stranding a verified challenge in "processing" under a live reservation
 // the way a crash between the reserve and the terminal write would.
 type challengeValidFailingOnceStorage struct {
@@ -899,15 +904,17 @@ type challengeValidFailingOnceStorage struct {
 	failed bool
 }
 
-func (s *challengeValidFailingOnceStorage) SetChallengeValid(ctx context.Context, id, reservationToken string, validated time.Time, attestation []byte) error {
-	s.mu.Lock()
-	first := !s.failed
-	s.failed = true
-	s.mu.Unlock()
-	if first {
-		return errors.New("backend unavailable")
+func (s *challengeValidFailingOnceStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+	if challenge.Status == nanoca.ChallengeStatusValid {
+		s.mu.Lock()
+		first := !s.failed
+		s.failed = true
+		s.mu.Unlock()
+		if first {
+			return errors.New("backend unavailable")
+		}
 	}
-	return s.Storage.SetChallengeValid(ctx, id, reservationToken, validated, attestation)
+	return s.Storage.SettleChallenge(ctx, challenge, reservationToken)
 }
 
 // A challenge left in "processing" by an interrupted validation has no owner:
@@ -999,17 +1006,20 @@ type challengeValidRacedStorage struct {
 	nanoca.Storage
 }
 
-func (s challengeValidRacedStorage) SetChallengeValid(ctx context.Context, id, reservationToken string, validated time.Time, attestation []byte) error {
-	if err := s.Storage.SetChallengeValid(ctx, id, reservationToken, validated, attestation); err != nil {
+func (s challengeValidRacedStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+	if err := s.Storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
 		return err
+	}
+	if challenge.Status != nanoca.ChallengeStatusValid {
+		return nil
 	}
 	return fmt.Errorf("challenge status is valid, not processing: %w", nanoca.ErrStatusMismatch)
 }
 
 // Losing the terminal write to a concurrent validation is the same
-// client-state condition the SetChallengeProcessing path reports with the
-// challenge's current state; a 500 invites the client to retry a challenge
-// that has already succeeded.
+// client-state condition the reserve path reports with the challenge's
+// current state; a 500 invites the client to retry a challenge that has
+// already succeeded.
 func TestChallengeValidStatusMismatchReportsState(t *testing.T) {
 	t.Parallel()
 

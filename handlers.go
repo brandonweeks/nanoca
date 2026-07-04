@@ -408,11 +408,8 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 	// A crash mid-finalize leaves the order processing in storage, and an
 	// RFC 8555 Section 7.1.6 client polls processing without re-submitting
 	// finalize; once the reservation lapses the order must read as ready
-	// again so a retry can reclaim it. Presentation only — the durable
-	// reclaim happens when the retry reserves.
-	if order.Status == OrderStatusProcessing && !order.Reservation.Live(ca.reservationLease) {
-		order.Status = OrderStatusReady
-	}
+	// again so a retry can reclaim it.
+	order.presentLapsed(ca.reservationLease)
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, order)
@@ -520,11 +517,7 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	// and an RFC 8555 Section 7.1.6 client polls after responding once
 	// rather than re-POSTing; once the reservation lapses the challenge
 	// must read as pending again so the client can respond anew.
-	// Presentation only — the durable reclaim happens when the retry
-	// reserves.
-	if challenge.Status == ChallengeStatusProcessing && !challenge.Reservation.Live(ca.reservationLease) {
-		challenge.Status = ChallengeStatusPending
-	}
+	challenge.presentLapsed(ca.reservationLease)
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
@@ -545,7 +538,7 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ca.handleChallengeResponse(ctx, w, challenge, postData)
+	ca.handleChallengeResponse(ctx, w, challenge, authz, postData)
 }
 
 func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
@@ -803,7 +796,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 	return order, nil
 }
 
-func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter, challenge *Challenge, postData *authenticatedPOST) {
+func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter, challenge *Challenge, authz *Authorization, postData *authenticatedPOST) {
 	var challengeResp ChallengeRequest
 	if err := json.Unmarshal(postData.body, &challengeResp); err != nil {
 		ca.logger.ErrorContext(ctx, "Failed to parse challenge response", "error", err)
@@ -874,7 +867,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Attestation verification failed", "challenge_id", challenge.ID, "error", err)
-		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Attestation verification failed"))
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation verification failed"))
 		return
 	}
 	// A validation that proves no identity must not settle valid: finalize
@@ -882,7 +875,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 	// order that yields none, so accepting it here would wedge the order.
 	if deviceInfo == nil {
 		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity", "challenge_id", challenge.ID, "format", attObj.Format)
-		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Attestation yielded no device identity"))
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation yielded no device identity"))
 		return
 	}
 
@@ -891,9 +884,10 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
 
 		// A failed authorizer call is a backend condition, not a verdict on
-		// the attestation; surrender the reservation so a retry can
-		// validate once it clears, instead of invalidating the challenge.
-		if releaseErr := ca.storage.ReleaseChallengeValidation(ctx, challenge.ID, reservationToken); releaseErr != nil {
+		// the attestation; settle back to pending so a retry can validate
+		// once it clears, instead of invalidating the challenge.
+		challenge.settlePending()
+		if releaseErr := ca.storage.SettleChallenge(ctx, challenge, reservationToken); releaseErr != nil {
 			// A lost race means another request settled the
 			// challenge; its result stands. Anything else leaves the
 			// challenge processing, and it heals by lease expiry.
@@ -908,12 +902,12 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	if !authorized {
 		ca.logger.WarnContext(ctx, "Device not authorized", "challenge_id", challenge.ID)
-		ca.failChallenge(ctx, w, challenge, reservationToken, Unauthorized("Device not authorized for certificate issuance"))
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Device not authorized for certificate issuance"))
 		return
 	}
 
-	now := time.Now()
-	if err := ca.storage.SetChallengeValid(ctx, challenge.ID, reservationToken, now, attObjBytes); err != nil {
+	challenge.settleValid(time.Now(), attObjBytes)
+	if err := ca.storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
 		// Another writer settled the challenge first; report its result.
 		if lostRace(err) {
 			ca.reportChallengeState(ctx, w, challenge.ID)
@@ -926,19 +920,8 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 
 	ca.logger.InfoContext(ctx, "Challenge validated", "challenge_id", challenge.ID, "type", challenge.Type)
 
-	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
-		ca.updateAuthorizationStatus(ctx, authz)
-	} else {
-		// The challenge is already valid, so nothing re-runs this refresh;
-		// the authorization stays pending until the client polls it.
-		ca.logger.ErrorContext(ctx, "Failed to get authorization after challenge validation", "error", err)
-	}
+	ca.updateAuthorizationStatus(ctx, authz)
 
-	challenge, err = ca.storage.GetChallenge(ctx, challenge.ID)
-	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to retrieve challenge after validation").WithCause(err))
-		return
-	}
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
 }
 
@@ -956,8 +939,9 @@ func (ca *CA) reportChallengeState(ctx context.Context, w http.ResponseWriter, c
 // failChallenge settles a reserved challenge as invalid and reports prob. A
 // lost race means another request settled the challenge first: its
 // result is reported instead and the recompute is left to it.
-func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challenge *Challenge, reservationToken string, prob *Problem) {
-	if err := ca.storage.SetChallengeInvalid(ctx, challenge.ID, reservationToken, time.Now(), prob); err != nil {
+func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challenge *Challenge, authz *Authorization, reservationToken string, prob *Problem) {
+	challenge.settleInvalid(time.Now(), prob)
+	if err := ca.storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
 		if lostRace(err) {
 			ca.reportChallengeState(ctx, w, challenge.ID)
 			return
@@ -965,11 +949,7 @@ func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challeng
 		ca.logger.ErrorContext(ctx, "Failed to update challenge status", "error", err)
 	}
 
-	if authz, err := ca.storage.GetAuthorization(ctx, challenge.AuthzID); err == nil {
-		ca.updateAuthorizationStatus(ctx, authz)
-	} else {
-		ca.logger.ErrorContext(ctx, "Failed to get authorization after challenge failure", "error", err)
-	}
+	ca.updateAuthorizationStatus(ctx, authz)
 	ca.writeProblem(ctx, w, prob)
 }
 
@@ -1052,9 +1032,7 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 		// here for the same reason handleChallenge presents it that way: an
 		// RFC 8555 Section 7.5.1 client polls the authorization object, and
 		// a challenge shown as processing forever would never be re-POSTed.
-		if currentChallenge.Status == ChallengeStatusProcessing && !currentChallenge.Reservation.Live(ca.reservationLease) {
-			currentChallenge.Status = ChallengeStatusPending
-		}
+		currentChallenge.presentLapsed(ca.reservationLease)
 
 		// Reservations and attestation blobs belong to the challenge
 		// record, not embedded copies.

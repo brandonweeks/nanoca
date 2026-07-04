@@ -47,8 +47,8 @@ func TestNotFoundErrors(t *testing.T) {
 		{"ReserveChallengeValidation", func() error {
 			return s.ReserveChallengeValidation(ctx, "ghost", "token", time.Minute)
 		}},
-		{"ReleaseChallengeValidation", func() error {
-			return s.ReleaseChallengeValidation(ctx, "ghost", "token")
+		{"SettleChallenge", func() error {
+			return s.SettleChallenge(ctx, &nanoca.Challenge{ID: "ghost"}, "token")
 		}},
 		{"ReserveOrderFinalize", func() error {
 			return s.ReserveOrderFinalize(ctx, "ghost", "token", time.Minute)

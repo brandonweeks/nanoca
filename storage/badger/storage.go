@@ -467,41 +467,19 @@ func (s *Storage) ReserveChallengeValidation(_ context.Context, id, reservationT
 	})
 }
 
-func (s *Storage) settleChallenge(id, reservationToken string, updateFn func(*nanoca.Challenge)) error {
+func (s *Storage) SettleChallenge(_ context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+	settled := *challenge
+	settled.Reservation = nil
+
 	return s.update(func(txn *badger.Txn) error {
-		var challenge nanoca.Challenge
-		if err := getJSON(txn, challengeKey(id), "challenge", &challenge); err != nil {
+		var stored nanoca.Challenge
+		if err := getJSON(txn, challengeKey(challenge.ID), "challenge", &stored); err != nil {
 			return err
 		}
-		if err := challengeRecord(&challenge).consume(reservationToken); err != nil {
+		if err := challengeRecord(&stored).consume(reservationToken); err != nil {
 			return err
 		}
-		updateFn(&challenge)
-
-		return setJSON(txn, challengeKey(id), "challenge", &challenge)
-	})
-}
-
-func (s *Storage) SetChallengeValid(_ context.Context, id, reservationToken string, validated time.Time, attestation []byte) error {
-	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
-		c.Status = nanoca.ChallengeStatusValid
-		c.Validated = &validated
-		c.Attestation = attestation
-		c.Error = nil
-	})
-}
-
-func (s *Storage) SetChallengeInvalid(_ context.Context, id, reservationToken string, validated time.Time, problem *nanoca.Problem) error {
-	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
-		c.Status = nanoca.ChallengeStatusInvalid
-		c.Validated = &validated
-		c.Error = problem
-	})
-}
-
-func (s *Storage) ReleaseChallengeValidation(_ context.Context, id, reservationToken string) error {
-	return s.settleChallenge(id, reservationToken, func(c *nanoca.Challenge) {
-		c.Status = nanoca.ChallengeStatusPending
+		return setJSON(txn, challengeKey(challenge.ID), "challenge", &settled)
 	})
 }
 
