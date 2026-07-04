@@ -56,7 +56,10 @@ func WithPrefix(prefix string) Option {
 // WithReservationLease sets how long a finalize or challenge-validation
 // reservation is honored before another request may reclaim it. It bounds
 // how long a crashed instance can hold an order or challenge in processing,
-// and must exceed the worst-case verifier, authorizer, and issuer latency.
+// and must exceed the worst-case verifier, authorizer, and issuer latency,
+// plus any wall-clock skew between CA hosts sharing the store: a reader
+// whose clock runs ahead sees the lease shortened by the skew. The default
+// is one minute.
 func WithReservationLease(d time.Duration) Option {
 	return func(ca *CA) {
 		ca.reservationLease = d
