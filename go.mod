@@ -3,7 +3,7 @@ module github.com/brandonweeks/nanoca
 go 1.26.0
 
 require (
-	github.com/dgraph-io/badger/v4 v4.9.2
+	github.com/dgraph-io/badger/v4 v4.9.3
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/micromdm/nanolib v0.5.1
