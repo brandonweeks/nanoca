@@ -472,6 +472,13 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 	// pending orders.
 	ca.updateAuthorizationStatus(ctx, authz)
 
+	// The composed challenge copies carry the stored status; a processing
+	// challenge whose reservation lapsed reads as pending, as
+	// handleChallenge presents it.
+	for i := range authz.Challenges {
+		authz.Challenges[i].presentLapsed(ca.reservationLease)
+	}
+
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, authz)
 	} else {
@@ -601,9 +608,9 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scrubStorageState strips storage-internal state — the reservation and the
-// stored attestation object — from a client-facing copy; the ACME wire
-// format has neither field.
+// scrubStorageState strips storage-internal state, the reservation, the
+// stored attestation object, and the challenge ID list, from a
+// client-facing copy; the ACME wire format has none of these fields.
 func scrubStorageState(data any) any {
 	switch v := data.(type) {
 	case *Order:
@@ -617,6 +624,7 @@ func scrubStorageState(data any) any {
 		return &scrubbed
 	case *Authorization:
 		scrubbed := *v
+		scrubbed.ChallengeIDs = nil
 		scrubbed.Challenges = slices.Clone(v.Challenges)
 		for i := range scrubbed.Challenges {
 			scrubbed.Challenges[i].Reservation = nil
@@ -756,7 +764,6 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 			Identifier: identifier,
 			Status:     "pending",
 			Expires:    &expires,
-			Challenges: []Challenge{},
 			CreatedAt:  time.Now(),
 		}
 
@@ -772,7 +779,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 			}
 
 			challenges = append(challenges, challenge)
-			authz.Challenges = append(authz.Challenges, *challenge)
+			authz.ChallengeIDs = append(authz.ChallengeIDs, challengeID)
 		}
 
 		authzs = append(authzs, authz)
@@ -1005,8 +1012,7 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 }
 
 // updateAuthorizationStatus settles a pending authorization once its
-// challenges settle, refreshing the embedded challenge copies with the
-// transition. The pending-only guard — enforced again by
+// challenges settle. The pending-only guard — enforced again by
 // SettleAuthorization against the stored record — keeps a recompute from
 // stale reads from overwriting a settlement another request has since
 // written; a recompute that settles nothing writes nothing.
@@ -1016,11 +1022,11 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 	}
 
 	// An authorization with no challenges must not count as valid.
-	allValid := len(authz.Challenges) > 0
+	allValid := len(authz.ChallengeIDs) > 0
 	anyInvalid := false
 
-	for i, challenge := range authz.Challenges {
-		currentChallenge, err := ca.storage.GetChallenge(ctx, challenge.ID)
+	for _, challengeID := range authz.ChallengeIDs {
+		challenge, err := ca.storage.GetChallenge(ctx, challengeID)
 		if err != nil {
 			allValid = false
 			continue
@@ -1030,19 +1036,13 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 		// here for the same reason handleChallenge presents it that way: an
 		// RFC 8555 Section 7.5.1 client polls the authorization object, and
 		// a challenge shown as processing forever would never be re-POSTed.
-		currentChallenge.presentLapsed(ca.reservationLease)
+		challenge.presentLapsed(ca.reservationLease)
 
-		// Reservations and attestation blobs belong to the challenge
-		// record, not embedded copies.
-		currentChallenge.Reservation = nil
-		currentChallenge.Attestation = nil
-		authz.Challenges[i] = *currentChallenge
-
-		if currentChallenge.Status == "invalid" {
+		if challenge.Status == ChallengeStatusInvalid {
 			anyInvalid = true
 			break
 		}
-		if currentChallenge.Status != "valid" {
+		if challenge.Status != ChallengeStatusValid {
 			allValid = false
 		}
 	}
@@ -1265,15 +1265,15 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 			continue
 		}
 
-		for _, challenge := range authz.Challenges {
-			if challenge.Status != ChallengeStatusValid {
-				continue
-			}
-			challengeObj, err := ca.storage.GetChallenge(ctx, challenge.ID)
+		for _, challengeID := range authz.ChallengeIDs {
+			challenge, err := ca.storage.GetChallenge(ctx, challengeID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get challenge: %w", err)
 			}
-			deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challengeObj)
+			if challenge.Status != ChallengeStatusValid {
+				continue
+			}
+			deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challenge)
 			if err != nil {
 				return nil, fmt.Errorf("failed to extract device info: %w", err)
 			}

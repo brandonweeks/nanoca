@@ -81,10 +81,12 @@ type Storage interface {
 	ReleaseOrderFinalize(ctx context.Context, id, token, to string) error
 	GetOrdersByAccount(ctx context.Context, accountID string) ([]*Order, error)
 
+	// GetAuthorization loads an authorization, composing the wire-format
+	// Challenges from the challenge records named by ChallengeIDs; the
+	// stored record carries only the IDs.
 	GetAuthorization(ctx context.Context, id string) (*Authorization, error)
 	// SettleAuthorization transitions a pending authorization to
-	// authz.Status — valid or invalid — writing the full record so the
-	// refreshed embedded challenge copies land with the transition. It
+	// authz.Status, valid or invalid; only the status is written. It
 	// returns ErrStatusMismatch, atomically with the write, when the stored
 	// authorization is no longer pending, so a recompute from stale reads
 	// cannot overwrite a settlement another request has since written.

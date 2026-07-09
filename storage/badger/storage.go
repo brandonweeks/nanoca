@@ -298,7 +298,11 @@ func (s *Storage) CreateOrder(_ context.Context, order *nanoca.Order, authzs []*
 			}
 		}
 		for _, authz := range authzs {
-			if err := setJSON(txn, authzKey(authz.ID), "authorization", authz); err != nil {
+			// The composed challenge copies are never persisted; the
+			// stored record names its challenges by ID.
+			stored := *authz
+			stored.Challenges = nil
+			if err := setJSON(txn, authzKey(authz.ID), "authorization", &stored); err != nil {
 				return err
 			}
 		}
@@ -402,7 +406,19 @@ func (s *Storage) GetAuthorization(_ context.Context, id string) (*nanoca.Author
 	var authz nanoca.Authorization
 
 	err := s.db.View(func(txn *badger.Txn) error {
-		return getJSON(txn, authzKey(id), "authorization", &authz)
+		if err := getJSON(txn, authzKey(id), "authorization", &authz); err != nil {
+			return err
+		}
+
+		authz.Challenges = make([]nanoca.Challenge, 0, len(authz.ChallengeIDs))
+		for _, challengeID := range authz.ChallengeIDs {
+			var challenge nanoca.Challenge
+			if err := getJSON(txn, challengeKey(challengeID), "challenge", &challenge); err != nil {
+				return err
+			}
+			authz.Challenges = append(authz.Challenges, challenge)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -420,7 +436,8 @@ func (s *Storage) SettleAuthorization(_ context.Context, authz *nanoca.Authoriza
 		if stored.Status != nanoca.AuthzStatusPending {
 			return fmt.Errorf("authorization status is %s, not %s: %w", stored.Status, nanoca.AuthzStatusPending, nanoca.ErrStatusMismatch)
 		}
-		return setJSON(txn, authzKey(authz.ID), "authorization", authz)
+		stored.Status = authz.Status
+		return setJSON(txn, authzKey(authz.ID), "authorization", &stored)
 	})
 }
 

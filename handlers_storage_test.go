@@ -1293,19 +1293,17 @@ func TestFinalizeRefusesOrderWithoutValidAuthz(t *testing.T) {
 	t.Error("finalize issued a certificate without the attested identifiers")
 }
 
-// The attestation blob belongs to the challenge record: finalize re-reads it
-// through GetChallenge and responses scrub it, so nothing ever reads a copy
-// embedded in the authorization. Persisting one there duplicates a
-// multi-kilobyte CBOR object into every settled authorization and pays its
-// (de)serialization on every authz poll, order recompute, and finalize.
-func TestSettledAuthorizationOmitsAttestation(t *testing.T) {
+// The stored authorization names its challenges by ID and reads compose the
+// wire-format challenges from the challenge records, so a settled
+// authorization always reflects the live challenge state.
+func TestSettledAuthorizationComposesChallenges(t *testing.T) {
 	t.Parallel()
 
 	storage := newTestStorage(t)
 	ts := newStorageTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "embedded-blob-device")
+	order, chal := pendingChallenge(t, client, "composed-device")
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1317,10 +1315,14 @@ func TestSettledAuthorizationOmitsAttestation(t *testing.T) {
 	if authz.Status != nanoca.AuthzStatusValid {
 		t.Fatalf("authorization status = %q, want %q", authz.Status, nanoca.AuthzStatusValid)
 	}
-	for _, challenge := range authz.Challenges {
-		if len(challenge.Attestation) > 0 {
-			t.Errorf("settled authorization embeds a %d-byte attestation for challenge %s", len(challenge.Attestation), challenge.ID)
-		}
+	if len(authz.ChallengeIDs) != 1 {
+		t.Fatalf("authorization challenge IDs = %v, want one", authz.ChallengeIDs)
+	}
+	if len(authz.Challenges) != 1 {
+		t.Fatalf("composed challenges = %d, want 1", len(authz.Challenges))
+	}
+	if got := authz.Challenges[0]; got.ID != authz.ChallengeIDs[0] || got.Status != nanoca.ChallengeStatusValid {
+		t.Errorf("composed challenge = %q status %q, want %q status %q", got.ID, got.Status, authz.ChallengeIDs[0], nanoca.ChallengeStatusValid)
 	}
 }
 
