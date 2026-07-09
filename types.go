@@ -54,7 +54,8 @@ type HardwareModule struct {
 // certificate response is built by ServedChain, which omits the root.
 type Certificate struct {
 	*x509.Certificate `json:"-"`
-	// ID is the storage and URL identifier; the CA sets it to the order ID.
+	// ID is the storage and URL identifier; the CA assigns a fresh random
+	// ID per finalize attempt.
 	ID           string   `json:"id"`
 	Raw          []byte   `json:"raw"`
 	SerialNumber string   `json:"serialNumber"`

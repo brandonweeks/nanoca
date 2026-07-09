@@ -622,8 +622,13 @@ func TestStorage_CompleteOrder(t *testing.T) {
 	if err := storage.CompleteOrder(ctx, order, cert, "t1"); !errors.Is(err, nanoca.ErrStatusMismatch) {
 		t.Errorf("CompleteOrder(ready, unreserved) error = %v, want ErrStatusMismatch", err)
 	}
-	if _, err := storage.GetCertificate(ctx, "o1"); !errors.Is(err, nanoca.ErrNotFound) {
-		t.Errorf("GetCertificate() after failed completion error = %v, want ErrNotFound", err)
+	// The certificate write is unconditional; a failed completion leaves it
+	// stored but referenced by no order.
+	if _, err := storage.GetCertificate(ctx, "o1"); err != nil {
+		t.Errorf("GetCertificate() after failed completion error = %v", err)
+	}
+	if got, err := storage.GetOrder(ctx, "o1"); err != nil || got.Status != nanoca.OrderStatusReady {
+		t.Errorf("order after failed completion = %+v, %v, want status %q", got, err, nanoca.OrderStatusReady)
 	}
 
 	if err := storage.ReserveOrderFinalize(ctx, "o1", "t1", time.Minute); err != nil {

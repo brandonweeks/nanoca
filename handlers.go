@@ -1185,13 +1185,14 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 	return order, nil
 }
 
-// issueForOrder issues the certificate for a reserved order and commits it
-// atomically with the order's valid transition. Nothing is persisted until
-// that commit, so a failure releases the reservation and discards the
-// signed certificate — a retry issues a fresh certificate for the CSR it
-// actually carries, so a stored certificate never predates the CSR that
-// finalized the order — and a crash leaves the order processing until the
-// lease lapses and a retry reclaims it.
+// issueForOrder issues the certificate for a reserved order under a fresh
+// per-attempt ID and commits it by transitioning the order to valid. The
+// token-gated order write is the commit point: a failure releases the
+// reservation and leaves the signed certificate stored but referenced by
+// no order, so it is never served. A retry issues a fresh certificate for
+// the CSR it actually carries, so a served certificate never predates the
+// CSR that finalized the order, and a crash leaves the order processing
+// until the lease lapses and a retry reclaims it.
 func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.CertificateRequest, token string) (*Certificate, []*DeviceInfo, error) {
 	deviceInfos, err := ca.deviceInfosForOrder(ctx, order)
 	if err != nil {
@@ -1202,13 +1203,13 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 	if err != nil {
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
 	}
-	cert.ID = order.ID
+	cert.ID = randomID(16)
 
 	order.Status = OrderStatusValid
 	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.ID))
 	order.Reservation = nil
 	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
-		ca.logger.ErrorContext(ctx, "Discarding signed certificate after failed completion", "serial_number", cert.SerialNumber, "error", err)
+		ca.logger.ErrorContext(ctx, "Leaving signed certificate unreferenced after failed completion", "serial_number", cert.SerialNumber, "error", err)
 		// A lost race means the lease lapsed and another finalize
 		// reclaimed the order; its outcome stands and there is no
 		// reservation left to release. That is a client-state condition

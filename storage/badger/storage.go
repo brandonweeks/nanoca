@@ -484,9 +484,20 @@ func (s *Storage) SettleChallenge(_ context.Context, challenge *nanoca.Challenge
 }
 
 func (s *Storage) CompleteOrder(_ context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+	// The certificate is written first, unconditionally; the token-gated
+	// order write below is the commit point that makes it reachable. A
+	// completion that loses the order write leaves the certificate stored
+	// but referenced by no order.
+	err := s.db.Update(func(txn *badger.Txn) error {
+		return setJSON(txn, certificateKey(cert.ID), "certificate", cert)
+	})
+	if err != nil {
+		return err
+	}
+
 	// CompleteOrder owns the processing-to-valid transition; forcing the
-	// status here keeps a stored certificate from ever sharing a record
-	// with a non-valid order, whatever the caller passed.
+	// status here keeps an order from referencing a certificate without
+	// turning valid, whatever the caller passed.
 	completed := *order
 	completed.Status = nanoca.OrderStatusValid
 	completed.Reservation = nil
@@ -499,11 +510,7 @@ func (s *Storage) CompleteOrder(_ context.Context, order *nanoca.Order, cert *na
 		if err := orderRecord(&stored).consume(token); err != nil {
 			return err
 		}
-
-		if err := setJSON(txn, orderKey(order.ID), "order", &completed); err != nil {
-			return err
-		}
-		return setJSON(txn, certificateKey(cert.ID), "certificate", cert)
+		return setJSON(txn, orderKey(order.ID), "order", &completed)
 	})
 }
 

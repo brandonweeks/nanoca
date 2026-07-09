@@ -103,13 +103,15 @@ type Storage interface {
 	// after a transient failure.
 	SettleChallenge(ctx context.Context, challenge *Challenge, reservationToken string) error
 
-	// CompleteOrder atomically stores the certificate under Certificate.ID
-	// — the identifier GetCertificate looks up — and transitions the order
-	// from processing to valid, clearing its reservation; the write
+	// CompleteOrder stores the certificate under Certificate.ID, the
+	// identifier GetCertificate looks up, and transitions the order from
+	// processing to valid, clearing its reservation. The order write
 	// requires the matching token, so a finalize whose reservation was
-	// reclaimed cannot persist a certificate for a stale CSR. On error
-	// neither write is persisted, so a stored certificate always belongs
-	// to a valid order.
+	// reclaimed cannot make its certificate reachable for a stale CSR.
+	// The certificate write is unconditional and lands before the order
+	// write, so a failed completion can leave a certificate stored but
+	// referenced by no order; a certificate is served only through an
+	// order whose Certificate URL names it.
 	CompleteOrder(ctx context.Context, order *Order, cert *Certificate, token string) error
 	GetCertificate(ctx context.Context, id string) (*Certificate, error)
 

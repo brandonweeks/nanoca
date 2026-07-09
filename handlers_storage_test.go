@@ -128,8 +128,8 @@ func (s *authzLookupFailingStorage) GetAuthorization(ctx context.Context, id str
 	return s.Storage.GetAuthorization(ctx, id)
 }
 
-// completeOrderFailingOnceStorage fails the first atomic completion, after
-// the certificate has been signed but before anything is persisted.
+// completeOrderFailingOnceStorage fails the first completion, after the
+// certificate has been signed but before the order commits.
 type completeOrderFailingOnceStorage struct {
 	nanoca.Storage
 	mu     sync.Mutex
@@ -145,6 +145,32 @@ func (s *completeOrderFailingOnceStorage) CompleteOrder(ctx context.Context, ord
 		return errors.New("backend unavailable")
 	}
 	return s.Storage.CompleteOrder(ctx, order, cert, token)
+}
+
+// completeOrderStaleTokenStorage passes a stale token to the first
+// completion, as when another finalize reclaims a lapsed reservation: the
+// certificate write lands but the order commit is refused. It records the
+// ID of the certificate left behind.
+type completeOrderStaleTokenStorage struct {
+	nanoca.Storage
+	mu     sync.Mutex
+	certID string
+}
+
+func (s *completeOrderStaleTokenStorage) CompleteOrder(ctx context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+	s.mu.Lock()
+	if s.certID == "" {
+		s.certID = cert.ID
+		token = "stale-" + token
+	}
+	s.mu.Unlock()
+	return s.Storage.CompleteOrder(ctx, order, cert, token)
+}
+
+func (s *completeOrderStaleTokenStorage) unreferencedCertID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.certID
 }
 
 type selfSignedIssuer struct{}
@@ -388,11 +414,11 @@ func TestFinalizeDeviceInfoStorageFailure(t *testing.T) {
 	wantServerInternal(t, err)
 }
 
-// A failed completion persists nothing: the signed certificate is discarded
-// and the order stays ready, so a retry — even with a regenerated key —
-// gets a fresh certificate for the CSR it actually carries. Once the order
-// is valid, further finalizes are refused per RFC 8555 Section 7.4 rather
-// than answered with the stored certificate.
+// A failed completion never becomes servable: the signed certificate is
+// left unreferenced and the order stays ready, so a retry, even with a
+// regenerated key, gets a fresh certificate for the CSR it actually
+// carries. Once the order is valid, further finalizes are refused per
+// RFC 8555 Section 7.4 rather than answered with the stored certificate.
 func TestFinalizeRetryAfterCompletionFailure(t *testing.T) {
 	t.Parallel()
 
@@ -434,6 +460,40 @@ func TestFinalizeRetryAfterCompletionFailure(t *testing.T) {
 	var ae *acme.Error
 	if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:orderNotReady" {
 		t.Errorf("finalize after valid error = %v, want orderNotReady", err)
+	}
+}
+
+// A completion that loses the token-gated order write leaves its
+// certificate stored but referenced by no order, so fetching it is refused
+// even for the account that finalized.
+func TestUnreferencedCertificateNotServed(t *testing.T) {
+	t.Parallel()
+
+	storage := &completeOrderStaleTokenStorage{Storage: newTestStorage(t)}
+	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
+
+	client := newACMEClient(t, ts)
+	order, chal := pendingChallenge(t, client, "unreferenced-device")
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
+		t.Fatal("finalize with a lost order write error = nil, want error")
+	}
+
+	certID := storage.unreferencedCertID()
+	if certID == "" {
+		t.Fatal("no completion was attempted")
+	}
+	if _, err := storage.GetCertificate(t.Context(), certID); err != nil {
+		t.Fatalf("GetCertificate() error = %v, want the unreferenced certificate stored", err)
+	}
+
+	_, err := client.FetchCert(t.Context(), ts.URL+"/certificate/"+certID, true)
+	var ae *acme.Error
+	if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:unauthorized" {
+		t.Errorf("FetchCert(unreferenced certificate) error = %v, want unauthorized", err)
 	}
 }
 
