@@ -290,14 +290,19 @@ func (s *Storage) UpdateAccount(_ context.Context, account *nanoca.Account) erro
 	})
 }
 
-func (s *Storage) CreateOrder(_ context.Context, order *nanoca.Order) error {
-	data, err := json.Marshal(order)
-	if err != nil {
-		return fmt.Errorf("failed to marshal order: %w", err)
-	}
-
+func (s *Storage) CreateOrder(_ context.Context, order *nanoca.Order, authzs []*nanoca.Authorization, challenges []*nanoca.Challenge) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(orderKey(order.ID), data)
+		for _, challenge := range challenges {
+			if err := setJSON(txn, challengeKey(challenge.ID), "challenge", challenge); err != nil {
+				return err
+			}
+		}
+		for _, authz := range authzs {
+			if err := setJSON(txn, authzKey(authz.ID), "authorization", authz); err != nil {
+				return err
+			}
+		}
+		return setJSON(txn, orderKey(order.ID), "order", order)
 	})
 }
 
@@ -393,17 +398,6 @@ func (s *Storage) GetOrdersByAccount(_ context.Context, accountID string) ([]*na
 	return orders, nil
 }
 
-func (s *Storage) CreateAuthorization(_ context.Context, authz *nanoca.Authorization) error {
-	data, err := json.Marshal(authz)
-	if err != nil {
-		return fmt.Errorf("failed to marshal authorization: %w", err)
-	}
-
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(authzKey(authz.ID), data)
-	})
-}
-
 func (s *Storage) GetAuthorization(_ context.Context, id string) (*nanoca.Authorization, error) {
 	var authz nanoca.Authorization
 
@@ -427,17 +421,6 @@ func (s *Storage) SettleAuthorization(_ context.Context, authz *nanoca.Authoriza
 			return fmt.Errorf("authorization status is %s, not %s: %w", stored.Status, nanoca.AuthzStatusPending, nanoca.ErrStatusMismatch)
 		}
 		return setJSON(txn, authzKey(authz.ID), "authorization", authz)
-	})
-}
-
-func (s *Storage) CreateChallenge(_ context.Context, challenge *nanoca.Challenge) error {
-	data, err := json.Marshal(challenge)
-	if err != nil {
-		return fmt.Errorf("failed to marshal challenge: %w", err)
-	}
-
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(challengeKey(challenge.ID), data)
 	})
 }
 

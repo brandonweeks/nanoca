@@ -63,7 +63,7 @@ type orderCreateFailingStorage struct {
 	nanoca.Storage
 }
 
-func (orderCreateFailingStorage) CreateOrder(context.Context, *nanoca.Order) error {
+func (orderCreateFailingStorage) CreateOrder(context.Context, *nanoca.Order, []*nanoca.Authorization, []*nanoca.Challenge) error {
 	return errors.New("backend unavailable")
 }
 
@@ -71,7 +71,7 @@ type orderCreateNotFoundStorage struct {
 	nanoca.Storage
 }
 
-func (orderCreateNotFoundStorage) CreateOrder(context.Context, *nanoca.Order) error {
+func (orderCreateNotFoundStorage) CreateOrder(context.Context, *nanoca.Order, []*nanoca.Authorization, []*nanoca.Challenge) error {
 	return fmt.Errorf("parent record missing: %w", nanoca.ErrNotFound)
 }
 

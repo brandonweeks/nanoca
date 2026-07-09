@@ -103,9 +103,7 @@ func TestChallengeStatusMismatch(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
 
-	if err := s.CreateChallenge(ctx, &nanoca.Challenge{ID: "c1", Status: nanoca.ChallengeStatusValid}); err != nil {
-		t.Fatalf("CreateChallenge() error = %v", err)
-	}
+	createChallenge(t, s, &nanoca.Challenge{ID: "c1", Status: nanoca.ChallengeStatusValid})
 	if err := s.ReserveChallengeValidation(ctx, "c1", "token", time.Minute); !errors.Is(err, nanoca.ErrStatusMismatch) {
 		t.Errorf("ReserveChallengeValidation(valid challenge) error = %v, want ErrStatusMismatch", err)
 	}
@@ -117,7 +115,7 @@ func TestSetOrderStatus(t *testing.T) {
 	s := newTestStore(t)
 	ctx := t.Context()
 
-	if err := s.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}); err != nil {
+	if err := s.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 	if err := s.SetOrderStatus(ctx, "o1", nanoca.OrderStatusPending, nanoca.OrderStatusReady); err != nil {

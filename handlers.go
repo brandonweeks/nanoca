@@ -740,6 +740,8 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 	orderID := ca.generateOrderID()
 
 	var authzURLs []string
+	var authzs []*Authorization
+	var challenges []*Challenge
 
 	for _, identifier := range orderReq.Identifiers {
 		authzID := ca.generateAuthorizationID()
@@ -760,7 +762,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 
 		if identifier.Type == "permanent-identifier" || identifier.Type == "hardware-module" {
 			challengeID := ca.generateChallengeID()
-			challenge := Challenge{
+			challenge := &Challenge{
 				ID:      challengeID,
 				AuthzID: authzID,
 				Type:    "device-attest-01",
@@ -769,15 +771,11 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 				URL:     ca.url(fmt.Sprintf("/challenge/%s", challengeID)),
 			}
 
-			if err := ca.storage.CreateChallenge(ctx, &challenge); err != nil {
-				return nil, fmt.Errorf("failed to create challenge: %w", err)
-			}
-			authz.Challenges = append(authz.Challenges, challenge)
+			challenges = append(challenges, challenge)
+			authz.Challenges = append(authz.Challenges, *challenge)
 		}
 
-		if err := ca.storage.CreateAuthorization(ctx, authz); err != nil {
-			return nil, fmt.Errorf("failed to create authorization: %w", err)
-		}
+		authzs = append(authzs, authz)
 	}
 
 	order := &Order{
@@ -790,7 +788,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 		CreatedAt:      time.Now(),
 	}
 
-	if err := ca.storage.CreateOrder(ctx, order); err != nil {
+	if err := ca.storage.CreateOrder(ctx, order, authzs, challenges); err != nil {
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
 	return order, nil
