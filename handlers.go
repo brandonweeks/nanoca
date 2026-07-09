@@ -410,6 +410,7 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 	// finalize; once the reservation lapses the order must read as ready
 	// again so a retry can reclaim it.
 	order.presentLapsed(ca.reservationLease)
+	order.presentExpired()
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, order)
@@ -478,6 +479,7 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 	for i := range authz.Challenges {
 		authz.Challenges[i].presentLapsed(ca.reservationLease)
 	}
+	authz.presentExpired()
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, authz)
@@ -542,6 +544,11 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		// otherwise never retry.
 		ca.updateAuthorizationStatus(ctx, authz)
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, challenge)
+		return
+	}
+
+	if authz.expired() {
+		ca.writeProblem(ctx, w, Malformed("Authorization has expired"))
 		return
 	}
 
@@ -762,7 +769,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 		authzID := ca.generateAuthorizationID()
 		authzIDs = append(authzIDs, authzID)
 
-		expires := time.Now().Add(24 * time.Hour)
+		expires := time.Now().Add(ca.authzExpiry)
 		authz := &Authorization{
 			ID:         authzID,
 			AccountID:  accountID,
@@ -790,10 +797,12 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 		authzs = append(authzs, authz)
 	}
 
+	orderExpires := time.Now().Add(ca.orderExpiry)
 	order := &Order{
 		ID:               orderID,
 		AccountID:        accountID,
 		Status:           "pending",
+		Expires:          &orderExpires,
 		Identifiers:      orderReq.Identifiers,
 		AuthorizationIDs: authzIDs,
 		CreatedAt:        time.Now(),
@@ -967,7 +976,9 @@ func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challeng
 // stored record — keeps this recomputation from overwriting a status a
 // concurrent finalize has since written.
 func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
-	if order.Status != OrderStatusPending {
+	// An expired order is presented invalid and gated out of finalize;
+	// promoting it here would durably contradict that.
+	if order.Status != OrderStatusPending || order.expired() {
 		return
 	}
 
@@ -982,7 +993,9 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 			continue
 		}
 
-		if authz.Status == AuthzStatusInvalid {
+		// An expired authorization is a final state other than valid, so
+		// it settles the order as invalid per RFC 8555 Section 7.1.6.
+		if authz.Status == AuthzStatusInvalid || authz.expired() {
 			anyInvalid = true
 			break
 		}
@@ -1020,7 +1033,9 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 // stale reads from overwriting a settlement another request has since
 // written; a recompute that settles nothing writes nothing.
 func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorization) {
-	if authz.Status != AuthzStatusPending {
+	// An expired authorization is presented expired and its challenges are
+	// no longer answerable; settling it would durably contradict that.
+	if authz.Status != AuthzStatusPending || authz.expired() {
 		return
 	}
 
@@ -1112,6 +1127,13 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 
 	if order.AccountID != accountID {
 		return nil, Unauthorized("Order does not belong to account")
+	}
+
+	// An expired order presents as invalid, so it is not ready to
+	// finalize. Judged before the reserve, no reservation is ever taken
+	// on an expired order.
+	if order.expired() {
+		return nil, OrderNotReady("Order has expired")
 	}
 
 	// The reservation is the persisted processing status under a lease, so
@@ -1263,6 +1285,14 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get authorization: %w", err)
+		}
+		// An expired authorization no longer vouches for its identity,
+		// even if it settled valid before the window closed. Skipping it
+		// would issue a certificate silently missing its SANs, so the
+		// finalize fails terminally instead; expiry cannot heal, and per
+		// RFC 8555 Section 7.1.6 the order it backs is invalid.
+		if authz.expired() {
+			return nil, Unauthorized("Authorization has expired")
 		}
 		if authz.Status != AuthzStatusValid {
 			continue

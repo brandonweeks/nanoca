@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"testing"
+	"time"
 )
 
 // makeCert creates a certificate signed by parent (parent==nil/self for a
@@ -95,5 +96,59 @@ func TestIsSelfSignedDER(t *testing.T) {
 	}
 	if isSelfSignedDER([]byte("not-a-cert")) {
 		t.Error("unparseable DER should not be detected as self-signed")
+	}
+}
+
+// Expiry presentation must not fight the reservation lease: a processing
+// order with a live reservation is mid-finalize and presents as processing
+// even past Expires, while a lapsed one reads ready first and then falls to
+// invalid. Terminal states are left alone.
+func TestOrderPresentExpired(t *testing.T) {
+	t.Parallel()
+
+	past := time.Now().Add(-time.Minute)
+	present := func(o *Order) string {
+		o.presentLapsed(time.Minute)
+		o.presentExpired()
+		return o.Status
+	}
+
+	live := &Order{Status: OrderStatusProcessing, Expires: &past, Reservation: &Reservation{Token: "t", ReservedAt: time.Now()}}
+	if got := present(live); got != OrderStatusProcessing {
+		t.Errorf("live processing order presents %q, want %q", got, OrderStatusProcessing)
+	}
+
+	lapsed := &Order{Status: OrderStatusProcessing, Expires: &past, Reservation: &Reservation{Token: "t", ReservedAt: time.Now().Add(-time.Hour)}}
+	if got := present(lapsed); got != OrderStatusInvalid {
+		t.Errorf("lapsed processing order presents %q, want %q", got, OrderStatusInvalid)
+	}
+
+	valid := &Order{Status: OrderStatusValid, Expires: &past}
+	if got := present(valid); got != OrderStatusValid {
+		t.Errorf("valid order presents %q, want %q", got, OrderStatusValid)
+	}
+
+	unexpired := &Order{Status: OrderStatusPending}
+	if got := present(unexpired); got != OrderStatusPending {
+		t.Errorf("order without expiry presents %q, want %q", got, OrderStatusPending)
+	}
+}
+
+func TestAuthorizationPresentExpired(t *testing.T) {
+	t.Parallel()
+
+	past := time.Now().Add(-time.Minute)
+	for _, status := range []string{AuthzStatusPending, AuthzStatusValid} {
+		authz := &Authorization{Status: status, Expires: &past}
+		authz.presentExpired()
+		if authz.Status != AuthzStatusExpired {
+			t.Errorf("expired %s authorization presents %q, want %q", status, authz.Status, AuthzStatusExpired)
+		}
+	}
+
+	invalid := &Authorization{Status: AuthzStatusInvalid, Expires: &past}
+	invalid.presentExpired()
+	if invalid.Status != AuthzStatusInvalid {
+		t.Errorf("invalid authorization presents %q, want %q", invalid.Status, AuthzStatusInvalid)
 	}
 }

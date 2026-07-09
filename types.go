@@ -200,6 +200,24 @@ func (o *Order) presentLapsed(lease time.Duration) {
 	}
 }
 
+func (o *Order) expired() bool {
+	return o.Expires != nil && time.Now().After(*o.Expires)
+}
+
+// presentExpired rewrites an expired pending or ready order to invalid,
+// per RFC 8555 Section 7.1.6. Presentation only: nothing is deleted; the
+// finalize gate keeps an expired order unusable. Called after
+// presentLapsed, it leaves a processing order alone (a live reservation
+// passed the gate before the window closed and is allowed to finish)
+// and never touches a terminal status: a valid order past Expires stays
+// valid, since Expires bounds completing the order, not fetching its
+// certificate.
+func (o *Order) presentExpired() {
+	if (o.Status == OrderStatusPending || o.Status == OrderStatusReady) && o.expired() {
+		o.Status = OrderStatusInvalid
+	}
+}
+
 const (
 	IdentifierTypePermanentIdentifier = "permanent-identifier"
 	IdentifierTypeHardwareModule      = "hardware-module"
@@ -257,6 +275,19 @@ const (
 	AuthzStatusInvalid = "invalid"
 	AuthzStatusExpired = "expired"
 )
+
+func (a *Authorization) expired() bool {
+	return a.Expires != nil && time.Now().After(*a.Expires)
+}
+
+// presentExpired rewrites an expired pending or valid authorization to
+// expired. Presentation only: the challenge-response and settlement gates
+// keep an expired authorization unusable.
+func (a *Authorization) presentExpired() {
+	if (a.Status == AuthzStatusPending || a.Status == AuthzStatusValid) && a.expired() {
+		a.Status = AuthzStatusExpired
+	}
+}
 
 const (
 	ChallengeStatusPending    = "pending"

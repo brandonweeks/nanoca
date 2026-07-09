@@ -21,6 +21,8 @@ type CA struct {
 	baseURL          string
 	prefix           string
 	nonceExpiry      time.Duration
+	orderExpiry      time.Duration
+	authzExpiry      time.Duration
 	reservationLease time.Duration
 
 	// storage wraps the configured backend with the reservation and
@@ -96,6 +98,8 @@ func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, s
 		storage:           newStorageMachine(storage),
 		baseURL:           baseURL,
 		nonceExpiry:       time.Hour,
+		orderExpiry:       24 * time.Hour,
+		authzExpiry:       24 * time.Hour,
 		reservationLease:  time.Minute,
 		verifiers:         make(map[string]AttestationVerifier),
 	}
