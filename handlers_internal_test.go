@@ -41,9 +41,10 @@ func TestUpdateOrderStatusNoAuthorizations(t *testing.T) {
 	}
 }
 
-// Reservations and the stored attestation blob are storage concerns; they
-// must never reach the ACME wire format, and scrubbing them must not mutate
-// the stored record's copy.
+// Reservations, the stored attestation blob, and the stored ID fields are
+// storage concerns; they must never reach the ACME wire format, the URLs
+// composed from them must, and presenting must not mutate the stored
+// record's copy.
 func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	t.Parallel()
 
@@ -53,28 +54,40 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	}
 	attestation := []byte("attestation-object")
 
-	order := &Order{ID: "o1", Status: OrderStatusProcessing, Reservation: reservation()}
+	order := &Order{ID: "o1", Status: OrderStatusProcessing, AuthorizationIDs: []string{"z1"}, CertificateID: "cert1", Reservation: reservation()}
 	challenge := &Challenge{ID: "c1", Status: ChallengeStatusValid, Attestation: attestation, Reservation: reservation()}
 	authz := &Authorization{ID: "a1", ChallengeIDs: []string{"c1"}, Challenges: []Challenge{{ID: "c1", Attestation: attestation, Reservation: reservation()}}}
 
-	for name, data := range map[string]any{
-		"order":         order,
-		"challenge":     challenge,
-		"authorization": authz,
+	for name, tc := range map[string]struct {
+		data     any
+		composed []string
+	}{
+		"order":         {order, []string{`"/authz/z1"`, `"/order/o1/finalize"`, `"/certificate/cert1"`}},
+		"challenge":     {challenge, []string{`"/challenge/c1"`}},
+		"authorization": {authz, []string{`"/challenge/c1"`}},
 	} {
 		rec := httptest.NewRecorder()
-		ca.writeJSONResponse(t.Context(), rec, http.StatusOK, data, "")
-		for _, field := range []string{"reservation", "attestation", "challengeIds"} {
-			if body := rec.Body.String(); strings.Contains(body, field) {
+		ca.writeJSONResponse(t.Context(), rec, http.StatusOK, tc.data, "")
+		body := rec.Body.String()
+		for _, field := range []string{"reservation", "attestation", "challengeIds", "authorizationIds", "certificateId"} {
+			if strings.Contains(body, field) {
 				t.Errorf("%s response leaks %s state:\n%s", name, field, body)
+			}
+		}
+		for _, url := range tc.composed {
+			if !strings.Contains(body, url) {
+				t.Errorf("%s response lacks composed URL %s:\n%s", name, url, body)
 			}
 		}
 	}
 
 	if order.Reservation == nil || challenge.Reservation == nil || authz.Challenges[0].Reservation == nil {
-		t.Error("scrubbing mutated the caller's records")
+		t.Error("presenting mutated the caller's records")
 	}
 	if challenge.Attestation == nil || authz.Challenges[0].Attestation == nil {
-		t.Error("scrubbing mutated the caller's attestation")
+		t.Error("presenting mutated the caller's attestation")
+	}
+	if order.AuthorizationIDs == nil || order.CertificateID == "" {
+		t.Error("presenting mutated the caller's ID fields")
 	}
 }

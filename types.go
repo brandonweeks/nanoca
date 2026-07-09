@@ -150,19 +150,26 @@ func (r *Reservation) Live(lease time.Duration) bool {
 }
 
 type Order struct {
-	ID             string       `json:"id"`
-	Status         string       `json:"status"`
-	Expires        *time.Time   `json:"expires,omitempty"`
-	Identifiers    []Identifier `json:"identifiers"`
-	NotBefore      *time.Time   `json:"notBefore,omitempty"`
-	NotAfter       *time.Time   `json:"notAfter,omitempty"`
-	Error          *Problem     `json:"error,omitempty"`
-	Authorizations []string     `json:"authorizations"`
-	Finalize       string       `json:"finalize"`
-	Certificate    string       `json:"certificate,omitempty"`
-	AccountID      string       `json:"accountId"`
-	CreatedAt      time.Time    `json:"createdAt"`
-	Reservation    *Reservation `json:"reservation,omitempty"`
+	ID          string       `json:"id"`
+	Status      string       `json:"status"`
+	Expires     *time.Time   `json:"expires,omitempty"`
+	Identifiers []Identifier `json:"identifiers"`
+	NotBefore   *time.Time   `json:"notBefore,omitempty"`
+	NotAfter    *time.Time   `json:"notAfter,omitempty"`
+	Error       *Problem     `json:"error,omitempty"`
+	// AuthorizationIDs and CertificateID name the order's authorizations
+	// and issued certificate; the stored record carries only the IDs.
+	// Authorizations, Finalize, and Certificate are the ACME wire fields,
+	// composed from the IDs on read and never persisted, so the stored
+	// record does not go stale if the base URL changes.
+	AuthorizationIDs []string     `json:"authorizationIds,omitempty"`
+	CertificateID    string       `json:"certificateId,omitempty"`
+	Authorizations   []string     `json:"authorizations"`
+	Finalize         string       `json:"finalize"`
+	Certificate      string       `json:"certificate,omitempty"`
+	AccountID        string       `json:"accountId"`
+	CreatedAt        time.Time    `json:"createdAt"`
+	Reservation      *Reservation `json:"reservation,omitempty"`
 }
 
 type OrderRequest struct {
@@ -213,7 +220,9 @@ type Authorization struct {
 }
 
 type Challenge struct {
-	Type      string     `json:"type"`
+	Type string `json:"type"`
+	// URL is an ACME wire field composed from the ID on read and never
+	// persisted.
 	URL       string     `json:"url"`
 	Status    string     `json:"status"`
 	Validated *time.Time `json:"validated,omitempty"`

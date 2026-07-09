@@ -158,15 +158,25 @@ func (m *storageMachine) UpdateAccount(ctx context.Context, account *Account) er
 }
 
 func (m *storageMachine) CreateOrder(ctx context.Context, order *Order, authzs []*Authorization, challenges []*Challenge) error {
-	// The composed challenge copies are never persisted; a stored
-	// authorization names its challenges by ID.
-	stripped := make([]*Authorization, len(authzs))
+	// The composed wire fields are never persisted; a stored record names
+	// its children by ID.
+	o := *order
+	o.Authorizations = nil
+	o.Finalize = ""
+	o.Certificate = ""
+	strippedAuthzs := make([]*Authorization, len(authzs))
 	for i, authz := range authzs {
 		a := *authz
 		a.Challenges = nil
-		stripped[i] = &a
+		strippedAuthzs[i] = &a
 	}
-	return m.b.CreateOrder(ctx, order, stripped, challenges)
+	strippedChallenges := make([]*Challenge, len(challenges))
+	for i, challenge := range challenges {
+		c := *challenge
+		c.URL = ""
+		strippedChallenges[i] = &c
+	}
+	return m.b.CreateOrder(ctx, &o, strippedAuthzs, strippedChallenges)
 }
 
 func (m *storageMachine) GetOrder(ctx context.Context, id string) (*Order, error) {
@@ -275,6 +285,7 @@ func (m *storageMachine) ReserveChallengeValidation(ctx context.Context, id, res
 func (m *storageMachine) SettleChallenge(ctx context.Context, challenge *Challenge, reservationToken string) error {
 	settled := *challenge
 	settled.Reservation = nil
+	settled.URL = ""
 	return cas(ctx, m.b.GetChallenge, m.b.PutChallenge, challenge.ID, func(stored *Challenge) error {
 		if err := challengeRecord(stored).consume(reservationToken); err != nil {
 			return err

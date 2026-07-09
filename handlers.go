@@ -578,7 +578,7 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 
 	var order *Order
 	for _, o := range orders {
-		if o.Certificate == ca.url(fmt.Sprintf("/certificate/%s", certID)) {
+		if o.CertificateID == certID {
 			order = o
 			break
 		}
@@ -608,36 +608,49 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scrubStorageState strips storage-internal state, the reservation, the
-// stored attestation object, and the challenge ID list, from a
-// client-facing copy; the ACME wire format has none of these fields.
-func scrubStorageState(data any) any {
+// present composes the ACME wire URLs from the stored IDs and strips
+// storage-internal state, the reservation, the stored attestation object,
+// and the ID fields, from a client-facing copy; the ACME wire format has
+// none of the stored fields.
+func (ca *CA) present(data any) any {
 	switch v := data.(type) {
 	case *Order:
-		scrubbed := *v
-		scrubbed.Reservation = nil
-		return &scrubbed
-	case *Challenge:
-		scrubbed := *v
-		scrubbed.Reservation = nil
-		scrubbed.Attestation = nil
-		return &scrubbed
-	case *Authorization:
-		scrubbed := *v
-		scrubbed.ChallengeIDs = nil
-		scrubbed.Challenges = slices.Clone(v.Challenges)
-		for i := range scrubbed.Challenges {
-			scrubbed.Challenges[i].Reservation = nil
-			scrubbed.Challenges[i].Attestation = nil
+		presented := *v
+		presented.Reservation = nil
+		presented.Authorizations = make([]string, len(v.AuthorizationIDs))
+		for i, id := range v.AuthorizationIDs {
+			presented.Authorizations[i] = ca.url(fmt.Sprintf("/authz/%s", id))
 		}
-		return &scrubbed
+		presented.AuthorizationIDs = nil
+		presented.Finalize = ca.url(fmt.Sprintf("/order/%s/finalize", v.ID))
+		if v.CertificateID != "" {
+			presented.Certificate = ca.url(fmt.Sprintf("/certificate/%s", v.CertificateID))
+		}
+		presented.CertificateID = ""
+		return &presented
+	case *Challenge:
+		presented := *v
+		presented.Reservation = nil
+		presented.Attestation = nil
+		presented.URL = ca.url(fmt.Sprintf("/challenge/%s", v.ID))
+		return &presented
+	case *Authorization:
+		presented := *v
+		presented.ChallengeIDs = nil
+		presented.Challenges = slices.Clone(v.Challenges)
+		for i := range presented.Challenges {
+			presented.Challenges[i].Reservation = nil
+			presented.Challenges[i].Attestation = nil
+			presented.Challenges[i].URL = ca.url(fmt.Sprintf("/challenge/%s", presented.Challenges[i].ID))
+		}
+		return &presented
 	}
 	return data
 }
 
 func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, statusCode int, data any, nonce string) {
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(scrubStorageState(data)); err != nil {
+	if err := json.NewEncoder(&buf).Encode(ca.present(data)); err != nil {
 		ca.writeProblem(ctx, w, InternalServerError("Failed to encode response").WithCause(err))
 		return
 	}
@@ -747,14 +760,13 @@ func jwkThumbprint(jwk *jose.JSONWebKey) (string, error) {
 func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderRequest) (*Order, error) {
 	orderID := ca.generateOrderID()
 
-	var authzURLs []string
+	var authzIDs []string
 	var authzs []*Authorization
 	var challenges []*Challenge
 
 	for _, identifier := range orderReq.Identifiers {
 		authzID := ca.generateAuthorizationID()
-		authzURL := ca.url(fmt.Sprintf("/authz/%s", authzID))
-		authzURLs = append(authzURLs, authzURL)
+		authzIDs = append(authzIDs, authzID)
 
 		expires := time.Now().Add(24 * time.Hour)
 		authz := &Authorization{
@@ -775,7 +787,6 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 				Type:    "device-attest-01",
 				Status:  "pending",
 				Token:   ca.generateToken(),
-				URL:     ca.url(fmt.Sprintf("/challenge/%s", challengeID)),
 			}
 
 			challenges = append(challenges, challenge)
@@ -786,13 +797,12 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 	}
 
 	order := &Order{
-		ID:             orderID,
-		AccountID:      accountID,
-		Status:         "pending",
-		Identifiers:    orderReq.Identifiers,
-		Authorizations: authzURLs,
-		Finalize:       ca.url(fmt.Sprintf("/order/%s/finalize", orderID)),
-		CreatedAt:      time.Now(),
+		ID:               orderID,
+		AccountID:        accountID,
+		Status:           "pending",
+		Identifiers:      orderReq.Identifiers,
+		AuthorizationIDs: authzIDs,
+		CreatedAt:        time.Now(),
 	}
 
 	if err := ca.storage.CreateOrder(ctx, order, authzs, challenges); err != nil {
@@ -968,11 +978,10 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 	}
 
 	// An order with no authorizations must not count as valid.
-	allValid := len(order.Authorizations) > 0
+	allValid := len(order.AuthorizationIDs) > 0
 	anyInvalid := false
 
-	for _, authzURL := range order.Authorizations {
-		authzID := extractIDFromURL(authzURL, "/authz/")
+	for _, authzID := range order.AuthorizationIDs {
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
 			allValid = false
@@ -1204,7 +1213,7 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 	cert.ID = randomID(16)
 
 	order.Status = OrderStatusValid
-	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.ID))
+	order.CertificateID = cert.ID
 	order.Reservation = nil
 	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
 		ca.logger.ErrorContext(ctx, "Leaving signed certificate unreferenced after failed completion", "serial_number", cert.SerialNumber, "error", err)
@@ -1255,8 +1264,7 @@ func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) e
 // heal — so it is refused as retriable rather than issued identity-less.
 func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceInfo, error) {
 	var deviceInfos []*DeviceInfo
-	for _, authzURL := range order.Authorizations {
-		authzID := extractIDFromURL(authzURL, "/authz/")
+	for _, authzID := range order.AuthorizationIDs {
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get authorization: %w", err)
@@ -1322,11 +1330,4 @@ func (ca *CA) extractDeviceInfoFromChallenge(ctx context.Context, challenge *Cha
 	}
 
 	return deviceInfo, nil
-}
-
-func extractIDFromURL(url, prefix string) string {
-	if idx := strings.LastIndex(url, prefix); idx != -1 {
-		return url[idx+len(prefix):]
-	}
-	return ""
 }

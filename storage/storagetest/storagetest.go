@@ -191,13 +191,15 @@ func testRoundTrip(t *testing.T, s nanoca.Storage) {
 	checkRoundTrip(t, "account", gotAccount, account)
 
 	order := &nanoca.Order{
-		ID:          "o1",
-		AccountID:   "a1",
-		Status:      nanoca.OrderStatusProcessing,
-		Identifiers: []nanoca.Identifier{{Type: "permanent-identifier", Value: "serial-1"}},
-		Expires:     ptr(written),
-		Reservation: &nanoca.Reservation{Token: "t1", ReservedAt: written},
-		CreatedAt:   written,
+		ID:               "o1",
+		AccountID:        "a1",
+		Status:           nanoca.OrderStatusProcessing,
+		Identifiers:      []nanoca.Identifier{{Type: "permanent-identifier", Value: "serial-1"}},
+		Expires:          ptr(written),
+		AuthorizationIDs: []string{"z1"},
+		CertificateID:    "cert1",
+		Reservation:      &nanoca.Reservation{Token: "t1", ReservedAt: written},
+		CreatedAt:        written,
 	}
 	authz := &nanoca.Authorization{
 		ID:           "z1",
