@@ -56,7 +56,12 @@ type Certificate struct {
 	*x509.Certificate `json:"-"`
 	// ID is the storage and URL identifier; the CA assigns a fresh random
 	// ID per finalize attempt.
-	ID           string   `json:"id"`
+	ID string `json:"id"`
+	// OrderID names the order the certificate was issued for. A fetch is
+	// authorized only when that order also references the certificate
+	// back, so a certificate left behind by a failed or superseded
+	// finalize is never served.
+	OrderID      string   `json:"orderId"`
 	Raw          []byte   `json:"raw"`
 	SerialNumber string   `json:"serialNumber"`
 	ChainRaw     [][]byte `json:"chainRaw,omitempty"`

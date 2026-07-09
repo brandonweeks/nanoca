@@ -379,9 +379,12 @@ func TestNewOrderCreateNotFound(t *testing.T) {
 	wantServerInternal(t, err)
 }
 
-// Once finalize has issued and stored the certificate, the response must not
-// depend on re-reading the order: a miss there returns a permanent-looking
-// 400 for an order that actually completed, stranding the issued cert.
+// Once finalize has issued and stored the certificate, the finalize response
+// must not depend on re-reading the order: a miss there returns a
+// permanent-looking 400 for an order that actually completed. The certificate
+// fetch that follows does read the order, so with the order gone the fetch is
+// refused as unauthorized; the client only attempts it because finalize
+// already answered with the completed order.
 func TestFinalizeSurvivesOrderRereadFailure(t *testing.T) {
 	t.Parallel()
 
@@ -394,12 +397,10 @@ func TestFinalizeSurvivesOrderRereadFailure(t *testing.T) {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 
-	cert, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
-	if err != nil {
-		t.Fatalf("CreateOrderCert() error = %v, want success", err)
-	}
-	if len(cert) == 0 {
-		t.Error("CreateOrderCert() returned no certificate")
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+	var ae *acme.Error
+	if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:unauthorized" {
+		t.Fatalf("CreateOrderCert() error = %v, want unauthorized from the certificate fetch", err)
 	}
 }
 

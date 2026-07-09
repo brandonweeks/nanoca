@@ -224,10 +224,6 @@ func (m *storageMachine) ReleaseOrderFinalize(ctx context.Context, id, token, to
 	})
 }
 
-func (m *storageMachine) GetOrdersByAccount(ctx context.Context, accountID string) ([]*Order, error) {
-	return m.b.GetOrdersByAccount(ctx, accountID)
-}
-
 // GetAuthorization loads an authorization and composes the wire-format
 // Challenges from the challenge records named by ChallengeIDs.
 func (m *storageMachine) GetAuthorization(ctx context.Context, id string) (*Authorization, error) {

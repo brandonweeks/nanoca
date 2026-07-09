@@ -570,21 +570,15 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orders, err := ca.storage.GetOrdersByAccount(ctx, postData.accountID)
-	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to get orders").WithCause(err))
+	// An order that does not reference the certificate back marks a
+	// certificate left behind by a failed or superseded finalize; it
+	// belongs to no one.
+	order, err := ca.storage.GetOrder(ctx, cert.OrderID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get order").WithCause(err))
 		return
 	}
-
-	var order *Order
-	for _, o := range orders {
-		if o.CertificateID == certID {
-			order = o
-			break
-		}
-	}
-
-	if order == nil || order.AccountID != postData.accountID {
+	if err != nil || order.AccountID != postData.accountID || order.CertificateID != cert.ID {
 		ca.writeProblem(ctx, w, Unauthorized("Certificate does not belong to this account"))
 		return
 	}
@@ -1211,6 +1205,7 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
 	}
 	cert.ID = randomID(16)
+	cert.OrderID = order.ID
 
 	order.Status = OrderStatusValid
 	order.CertificateID = cert.ID

@@ -16,8 +16,7 @@ import (
 // Sentinel errors a backend must return (possibly wrapped):
 //
 //   - Get*, Put*, and TakeNonce return ErrNotFound when the record does
-//     not exist. GetOrdersByAccount is the exception: an account with no
-//     orders yields an empty slice and no error.
+//     not exist.
 //   - Put* returns ErrConflict when the presented revision no longer
 //     matches the stored one, meaning the record was written since the
 //     read that produced it. A backend that cannot tell a missing record
@@ -54,9 +53,8 @@ import (
 // record that marshals to the same document as the one written
 // (encoding/json on these types is the reference encoding). Any storage
 // shape works, one document per row or one column per field, as long as
-// the lookups beyond ID stay answerable: GetAccountByKey by
-// Account.KeyThumbprint and GetOrdersByAccount by Order.AccountID.
-// Equivalence is by value, not memory shape:
+// the only lookup beyond ID stays answerable: GetAccountByKey by
+// Account.KeyThumbprint. Equivalence is by value, not memory shape:
 //
 //   - Times are instants: a stored time may come back in any location as
 //     long as it names the same moment, preserved to at least microsecond
@@ -113,7 +111,6 @@ type Storage interface {
 	CreateOrder(ctx context.Context, order *Order, authzs []*Authorization, challenges []*Challenge) error
 	GetOrder(ctx context.Context, id string) (*Order, Revision, error)
 	PutOrder(ctx context.Context, order *Order, rev Revision) error
-	GetOrdersByAccount(ctx context.Context, accountID string) ([]*Order, error)
 
 	GetAuthorization(ctx context.Context, id string) (*Authorization, Revision, error)
 	PutAuthorization(ctx context.Context, authz *Authorization, rev Revision) error

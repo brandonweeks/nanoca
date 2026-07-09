@@ -202,22 +202,6 @@ func (m *MemoryStorage) PutOrder(_ context.Context, order *Order, rev Revision) 
 	return putRecord(m.orders, order.ID, order, rev)
 }
 
-func (m *MemoryStorage) GetOrdersByAccount(_ context.Context, accountID string) ([]*Order, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	orders := []*Order{}
-	for _, stored := range m.orders {
-		order, err := decode[Order](stored.data)
-		if err != nil {
-			return nil, err
-		}
-		if order.AccountID == accountID {
-			orders = append(orders, order)
-		}
-	}
-	return orders, nil
-}
-
 func (m *MemoryStorage) GetAuthorization(_ context.Context, id string) (*Authorization, Revision, error) {
 	return getRecord[Authorization](m, m.authzs, id)
 }

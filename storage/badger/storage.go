@@ -334,45 +334,6 @@ func (s *Storage) PutOrder(_ context.Context, order *nanoca.Order, rev nanoca.Re
 	return putRecord(s, orderKey(order.ID), "order", order, rev)
 }
 
-func (s *Storage) GetOrdersByAccount(_ context.Context, accountID string) ([]*nanoca.Order, error) {
-	var orders []*nanoca.Order
-
-	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = true
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		prefix := []byte(orderPrefix)
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			item := it.Item()
-			err := item.Value(func(val []byte) error {
-				var env envelope
-				if err := json.Unmarshal(val, &env); err != nil {
-					return err
-				}
-				var order nanoca.Order
-				if err := json.Unmarshal(env.Record, &order); err != nil {
-					return err
-				}
-				if order.AccountID == accountID {
-					orders = append(orders, &order)
-				}
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get orders by account: %w", err)
-	}
-
-	return orders, nil
-}
-
 func (s *Storage) GetAuthorization(_ context.Context, id string) (*nanoca.Authorization, nanoca.Revision, error) {
 	return getRecord[nanoca.Authorization](s, authzKey(id), "authorization")
 }

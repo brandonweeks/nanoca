@@ -31,7 +31,6 @@ func RunConformanceTests(t *testing.T, newStorage func(t *testing.T) nanoca.Stor
 	t.Run("LostUpdateStress", func(t *testing.T) { testLostUpdateStress(t, newStorage(t)) })
 	t.Run("TakeNonce", func(t *testing.T) { testTakeNonce(t, newStorage(t)) })
 	t.Run("ConcurrentTakeNonce", func(t *testing.T) { testConcurrentTakeNonce(t, newStorage(t)) })
-	t.Run("OrdersByAccount", func(t *testing.T) { testOrdersByAccount(t, newStorage(t)) })
 	t.Run("AccountByKey", func(t *testing.T) { testAccountByKey(t, newStorage(t)) })
 	t.Run("CreateOrderTree", func(t *testing.T) { testCreateOrderTree(t, newStorage(t)) })
 }
@@ -244,6 +243,7 @@ func testRoundTrip(t *testing.T, s nanoca.Storage) {
 
 	cert := &nanoca.Certificate{
 		ID:           "cert1",
+		OrderID:      "o1",
 		Raw:          []byte{0x30, 0x82, 0x01, 0x00},
 		SerialNumber: "1234",
 		ChainRaw:     [][]byte{{0x30, 0x81}, {0x30, 0x82}},
@@ -565,35 +565,6 @@ func testConcurrentTakeNonce(t *testing.T, s nanoca.Storage) {
 	}
 	if winners != 1 {
 		t.Errorf("concurrent TakeNonce winners = %d, want 1", winners)
-	}
-}
-
-func testOrdersByAccount(t *testing.T, s nanoca.Storage) {
-	ctx := t.Context()
-
-	orders, err := s.GetOrdersByAccount(ctx, "ghost")
-	if err != nil {
-		t.Fatalf("GetOrdersByAccount(unknown) error = %v, want nil", err)
-	}
-	if len(orders) != 0 {
-		t.Errorf("GetOrdersByAccount(unknown) = %d orders, want 0", len(orders))
-	}
-
-	createOrder(t, s, &nanoca.Order{ID: "o1", AccountID: "a1"})
-	createOrder(t, s, &nanoca.Order{ID: "o2", AccountID: "a2"})
-	createOrder(t, s, &nanoca.Order{ID: "o3", AccountID: "a1"})
-
-	orders, err = s.GetOrdersByAccount(ctx, "a1")
-	if err != nil {
-		t.Fatalf("GetOrdersByAccount() error = %v", err)
-	}
-	if len(orders) != 2 {
-		t.Fatalf("GetOrdersByAccount() = %d orders, want 2", len(orders))
-	}
-	for _, order := range orders {
-		if order.AccountID != "a1" {
-			t.Errorf("GetOrdersByAccount() returned order %s for account %s", order.ID, order.AccountID)
-		}
 	}
 }
 
