@@ -10,13 +10,19 @@ import (
 	"time"
 )
 
-type orderStatusRecorder struct {
+// orderWriteRecorder records whether any order write reached the backend;
+// the embedded nil Storage panics on any other call.
+type orderWriteRecorder struct {
 	Storage
-	set bool
+	wrote bool
 }
 
-func (s *orderStatusRecorder) SetOrderStatus(context.Context, string, string, string) error {
-	s.set = true
+func (s *orderWriteRecorder) GetOrder(_ context.Context, id string) (*Order, Revision, error) {
+	return &Order{ID: id, Status: OrderStatusPending}, "1", nil
+}
+
+func (s *orderWriteRecorder) PutOrder(context.Context, *Order, Revision) error {
+	s.wrote = true
 	return nil
 }
 
@@ -26,11 +32,11 @@ func (s *orderStatusRecorder) SetOrderStatus(context.Context, string, string, st
 func TestUpdateOrderStatusNoAuthorizations(t *testing.T) {
 	t.Parallel()
 
-	rec := &orderStatusRecorder{}
-	ca := &CA{logger: slog.New(slog.DiscardHandler), storage: rec}
+	rec := &orderWriteRecorder{}
+	ca := &CA{logger: slog.New(slog.DiscardHandler), storage: newStorageMachine(rec)}
 
 	ca.updateOrderStatus(t.Context(), &Order{ID: "o1", Status: OrderStatusPending})
-	if rec.set {
+	if rec.wrote {
 		t.Error("updateOrderStatus promoted an order with no authorizations")
 	}
 }

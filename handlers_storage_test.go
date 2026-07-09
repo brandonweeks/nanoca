@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,8 +29,8 @@ type accountLookupFailingStorage struct {
 	nanoca.Storage
 }
 
-func (accountLookupFailingStorage) GetAccountByKey(context.Context, string) (*nanoca.Account, error) {
-	return nil, errors.New("backend unavailable")
+func (accountLookupFailingStorage) GetAccountByKey(context.Context, string) (*nanoca.Account, nanoca.Revision, error) {
+	return nil, "", errors.New("backend unavailable")
 }
 
 type accountCreateRacingStorage struct {
@@ -48,15 +49,15 @@ func (s *accountCreateRacingStorage) CreateAccount(ctx context.Context, account 
 	if err := s.Storage.CreateAccount(ctx, &winner); err != nil {
 		return err
 	}
-	return nanoca.ErrAccountExists
+	return fmt.Errorf("account key already registered: %w", nanoca.ErrExists)
 }
 
 type orderLookupFailingStorage struct {
 	nanoca.Storage
 }
 
-func (orderLookupFailingStorage) GetOrder(context.Context, string) (*nanoca.Order, error) {
-	return nil, errors.New("backend unavailable")
+func (orderLookupFailingStorage) GetOrder(context.Context, string) (*nanoca.Order, nanoca.Revision, error) {
+	return nil, "", errors.New("backend unavailable")
 }
 
 type orderCreateFailingStorage struct {
@@ -83,9 +84,9 @@ type orderVanishingStorage struct {
 	vanished bool
 }
 
-func (s *orderVanishingStorage) CompleteOrder(ctx context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
-	err := s.Storage.CompleteOrder(ctx, order, cert, token)
-	if err == nil {
+func (s *orderVanishingStorage) PutOrder(ctx context.Context, order *nanoca.Order, rev nanoca.Revision) error {
+	err := s.Storage.PutOrder(ctx, order, rev)
+	if err == nil && order.Status == nanoca.OrderStatusValid {
 		s.mu.Lock()
 		s.vanished = true
 		s.mu.Unlock()
@@ -93,12 +94,12 @@ func (s *orderVanishingStorage) CompleteOrder(ctx context.Context, order *nanoca
 	return err
 }
 
-func (s *orderVanishingStorage) GetOrder(ctx context.Context, id string) (*nanoca.Order, error) {
+func (s *orderVanishingStorage) GetOrder(ctx context.Context, id string) (*nanoca.Order, nanoca.Revision, error) {
 	s.mu.Lock()
 	vanished := s.vanished
 	s.mu.Unlock()
 	if vanished {
-		return nil, nanoca.ErrNotFound
+		return nil, "", nanoca.ErrNotFound
 	}
 	return s.Storage.GetOrder(ctx, id)
 }
@@ -118,25 +119,25 @@ func (s *authzLookupFailingStorage) failLookups() {
 	s.mu.Unlock()
 }
 
-func (s *authzLookupFailingStorage) GetAuthorization(ctx context.Context, id string) (*nanoca.Authorization, error) {
+func (s *authzLookupFailingStorage) GetAuthorization(ctx context.Context, id string) (*nanoca.Authorization, nanoca.Revision, error) {
 	s.mu.Lock()
 	fail := s.fail
 	s.mu.Unlock()
 	if fail {
-		return nil, errors.New("backend unavailable")
+		return nil, "", errors.New("backend unavailable")
 	}
 	return s.Storage.GetAuthorization(ctx, id)
 }
 
-// completeOrderFailingOnceStorage fails the first completion, after the
-// certificate has been signed but before the order commits.
+// completeOrderFailingOnceStorage fails the first certificate write, after
+// the certificate has been signed but before anything is persisted.
 type completeOrderFailingOnceStorage struct {
 	nanoca.Storage
 	mu     sync.Mutex
 	failed bool
 }
 
-func (s *completeOrderFailingOnceStorage) CompleteOrder(ctx context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+func (s *completeOrderFailingOnceStorage) CreateCertificate(ctx context.Context, cert *nanoca.Certificate) error {
 	s.mu.Lock()
 	first := !s.failed
 	s.failed = true
@@ -144,33 +145,42 @@ func (s *completeOrderFailingOnceStorage) CompleteOrder(ctx context.Context, ord
 	if first {
 		return errors.New("backend unavailable")
 	}
-	return s.Storage.CompleteOrder(ctx, order, cert, token)
+	return s.Storage.CreateCertificate(ctx, cert)
 }
 
-// completeOrderStaleTokenStorage passes a stale token to the first
-// completion, as when another finalize reclaims a lapsed reservation: the
-// certificate write lands but the order commit is refused. It records the
-// ID of the certificate left behind.
-type completeOrderStaleTokenStorage struct {
+// completionRacedStorage persists the first finalize's certificate but fails
+// the order write that would commit it, leaving the certificate stored and
+// referenced by no order.
+type completionRacedStorage struct {
 	nanoca.Storage
-	mu     sync.Mutex
-	certID string
+	mu      sync.Mutex
+	certIDs []string
+	armed   bool
+	failed  bool
 }
 
-func (s *completeOrderStaleTokenStorage) CompleteOrder(ctx context.Context, order *nanoca.Order, cert *nanoca.Certificate, token string) error {
+func (s *completionRacedStorage) CreateCertificate(ctx context.Context, cert *nanoca.Certificate) error {
+	if err := s.Storage.CreateCertificate(ctx, cert); err != nil {
+		return err
+	}
 	s.mu.Lock()
-	if s.certID == "" {
-		s.certID = cert.ID
-		token = "stale-" + token
+	s.certIDs = append(s.certIDs, cert.ID)
+	s.armed = true
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *completionRacedStorage) PutOrder(ctx context.Context, order *nanoca.Order, rev nanoca.Revision) error {
+	s.mu.Lock()
+	fail := s.armed && !s.failed
+	if fail {
+		s.failed = true
 	}
 	s.mu.Unlock()
-	return s.Storage.CompleteOrder(ctx, order, cert, token)
-}
-
-func (s *completeOrderStaleTokenStorage) unreferencedCertID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.certID
+	if fail {
+		return errors.New("backend unavailable")
+	}
+	return s.Storage.PutOrder(ctx, order, rev)
 }
 
 type selfSignedIssuer struct{}
@@ -196,7 +206,7 @@ type nonceConsumeFailingStorage struct {
 	nanoca.Storage
 }
 
-func (nonceConsumeFailingStorage) ConsumeNonce(context.Context, string, time.Duration) (*nanoca.Nonce, error) {
+func (nonceConsumeFailingStorage) TakeNonce(context.Context, string) (*nanoca.Nonce, error) {
 	return nil, errors.New("backend unavailable")
 }
 
@@ -414,11 +424,11 @@ func TestFinalizeDeviceInfoStorageFailure(t *testing.T) {
 	wantServerInternal(t, err)
 }
 
-// A failed completion never becomes servable: the signed certificate is
-// left unreferenced and the order stays ready, so a retry, even with a
-// regenerated key, gets a fresh certificate for the CSR it actually
-// carries. Once the order is valid, further finalizes are refused per
-// RFC 8555 Section 7.4 rather than answered with the stored certificate.
+// A failed completion never becomes servable: the order stays ready, so a
+// retry, even with a regenerated key, gets a fresh certificate for the CSR
+// it actually carries. Once the order is valid, further finalizes are
+// refused per RFC 8555 Section 7.4 rather than answered with the stored
+// certificate.
 func TestFinalizeRetryAfterCompletionFailure(t *testing.T) {
 	t.Parallel()
 
@@ -463,37 +473,44 @@ func TestFinalizeRetryAfterCompletionFailure(t *testing.T) {
 	}
 }
 
-// A completion that loses the token-gated order write leaves its
-// certificate stored but referenced by no order, so fetching it is refused
-// even for the account that finalized.
-func TestUnreferencedCertificateNotServed(t *testing.T) {
+// A certificate whose order write lost the completion is stored but
+// referenced by no order; it must stay unservable even to the account that
+// requested it, while the retry's certificate is served normally.
+func TestCertificateUnreferencedByOrderNotServed(t *testing.T) {
 	t.Parallel()
 
-	storage := &completeOrderStaleTokenStorage{Storage: newTestStorage(t)}
+	storage := &completionRacedStorage{Storage: newTestStorage(t)}
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "unreferenced-device")
+	order, chal := pendingChallenge(t, client, "zombie-device")
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 
-	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err == nil {
-		t.Fatal("finalize with a lost order write error = nil, want error")
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+	wantServerInternal(t, err)
+
+	_, certURL, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+	if err != nil {
+		t.Fatalf("retried CreateOrderCert() error = %v", err)
 	}
 
-	certID := storage.unreferencedCertID()
-	if certID == "" {
-		t.Fatal("no completion was attempted")
-	}
-	if _, err := storage.GetCertificate(t.Context(), certID); err != nil {
-		t.Fatalf("GetCertificate() error = %v, want the unreferenced certificate stored", err)
+	storage.mu.Lock()
+	certIDs := slices.Clone(storage.certIDs)
+	storage.mu.Unlock()
+	if len(certIDs) != 2 {
+		t.Fatalf("stored certificates = %d, want 2", len(certIDs))
 	}
 
-	_, err := client.FetchCert(t.Context(), ts.URL+"/certificate/"+certID, true)
+	_, err = client.FetchCert(t.Context(), ts.URL+"/certificate/"+certIDs[0], true)
 	var ae *acme.Error
 	if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:unauthorized" {
-		t.Errorf("FetchCert(unreferenced certificate) error = %v, want unauthorized", err)
+		t.Errorf("FetchCert(unreferenced) error = %v, want unauthorized", err)
+	}
+
+	if _, err := client.FetchCert(t.Context(), certURL, true); err != nil {
+		t.Errorf("FetchCert(committed) error = %v", err)
 	}
 }
 
@@ -596,26 +613,28 @@ func (s *challengeRendezvousStorage) arm() {
 	s.mu.Unlock()
 }
 
-func (s *challengeRendezvousStorage) GetChallenge(ctx context.Context, id string) (*nanoca.Challenge, error) {
-	challenge, err := s.Storage.GetChallenge(ctx, id)
+func (s *challengeRendezvousStorage) GetChallenge(ctx context.Context, id string) (*nanoca.Challenge, nanoca.Revision, error) {
+	challenge, rev, err := s.Storage.GetChallenge(ctx, id)
 	if err != nil || challenge.Status != nanoca.ChallengeStatusPending {
-		return challenge, err
+		return challenge, rev, err
 	}
 	s.mu.Lock()
 	if !s.armed {
 		s.mu.Unlock()
-		return challenge, nil
+		return challenge, rev, nil
 	}
-	s.readers++
-	if s.readers == 2 {
-		close(s.both)
+	if s.readers < 2 {
+		s.readers++
+		if s.readers == 2 {
+			close(s.both)
+		}
 	}
 	s.mu.Unlock()
 	select {
 	case <-s.both:
 	case <-time.After(2 * time.Second):
 	}
-	return challenge, nil
+	return challenge, rev, nil
 }
 
 // Duplicate challenge POSTs can also race: both read "pending" before
@@ -664,13 +683,13 @@ type corruptAttestationStorage struct {
 	nanoca.Storage
 }
 
-func (s corruptAttestationStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+func (s corruptAttestationStorage) PutChallenge(ctx context.Context, challenge *nanoca.Challenge, rev nanoca.Revision) error {
 	if len(challenge.Attestation) > 0 {
 		truncated := *challenge
 		truncated.Attestation = challenge.Attestation[:1]
-		return s.Storage.SettleChallenge(ctx, &truncated, reservationToken)
+		return s.Storage.PutChallenge(ctx, &truncated, rev)
 	}
-	return s.Storage.SettleChallenge(ctx, challenge, reservationToken)
+	return s.Storage.PutChallenge(ctx, challenge, rev)
 }
 
 // An order whose stored attestation can never be re-verified is stuck: a
@@ -725,7 +744,7 @@ func (s *orderReadParkingStorage) park(n int) {
 	s.mu.Unlock()
 }
 
-func (s *orderReadParkingStorage) GetOrder(ctx context.Context, id string) (*nanoca.Order, error) {
+func (s *orderReadParkingStorage) GetOrder(ctx context.Context, id string) (*nanoca.Order, nanoca.Revision, error) {
 	s.mu.Lock()
 	if s.toPark > 0 {
 		s.toPark--
@@ -868,9 +887,10 @@ func TestOrderPollsProcessingDuringFinalize(t *testing.T) {
 	}
 }
 
-// orderWriteFailingStorage fails order writes while armed, simulating a
-// backend outage that also takes out any cleanup write a failing finalize
-// attempts.
+// orderWriteFailingStorage fails unreserved order writes while armed,
+// simulating a backend outage that also takes out any cleanup write a
+// failing finalize attempts. Writes that record a reservation still land,
+// so the outage begins after the reserve.
 type orderWriteFailingStorage struct {
 	nanoca.Storage
 	mu   sync.Mutex
@@ -889,18 +909,11 @@ func (s *orderWriteFailingStorage) failing() bool {
 	return s.fail
 }
 
-func (s *orderWriteFailingStorage) SetOrderStatus(ctx context.Context, id, from, to string) error {
-	if s.failing() {
+func (s *orderWriteFailingStorage) PutOrder(ctx context.Context, order *nanoca.Order, rev nanoca.Revision) error {
+	if s.failing() && order.Reservation == nil {
 		return errors.New("backend unavailable")
 	}
-	return s.Storage.SetOrderStatus(ctx, id, from, to)
-}
-
-func (s *orderWriteFailingStorage) ReleaseOrderFinalize(ctx context.Context, id, token, to string) error {
-	if s.failing() {
-		return errors.New("backend unavailable")
-	}
-	return s.Storage.ReleaseOrderFinalize(ctx, id, token, to)
+	return s.Storage.PutOrder(ctx, order, rev)
 }
 
 // failOnceIssuer fails the first issuance, as during a transient outage.
@@ -964,7 +977,7 @@ type challengeValidFailingOnceStorage struct {
 	failed bool
 }
 
-func (s *challengeValidFailingOnceStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
+func (s *challengeValidFailingOnceStorage) PutChallenge(ctx context.Context, challenge *nanoca.Challenge, rev nanoca.Revision) error {
 	if challenge.Status == nanoca.ChallengeStatusValid {
 		s.mu.Lock()
 		first := !s.failed
@@ -974,7 +987,7 @@ func (s *challengeValidFailingOnceStorage) SettleChallenge(ctx context.Context, 
 			return errors.New("backend unavailable")
 		}
 	}
-	return s.Storage.SettleChallenge(ctx, challenge, reservationToken)
+	return s.Storage.PutChallenge(ctx, challenge, rev)
 }
 
 // A challenge left in "processing" by an interrupted validation has no owner:
@@ -1061,19 +1074,35 @@ func TestFinalizeForeignAccountDoesNotReserveOrder(t *testing.T) {
 
 // challengeValidRacedStorage simulates another CA instance completing the
 // challenge between our processing transition and the terminal write: the
-// stored record advances to valid, and our write reports ErrStatusMismatch.
+// rival's settle lands first, so our conditional write conflicts and the
+// re-read finds the challenge already valid.
 type challengeValidRacedStorage struct {
 	nanoca.Storage
+	mu    sync.Mutex
+	raced bool
 }
 
-func (s challengeValidRacedStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
-	if err := s.Storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
-		return err
+func (s *challengeValidRacedStorage) PutChallenge(ctx context.Context, challenge *nanoca.Challenge, rev nanoca.Revision) error {
+	if challenge.Status == nanoca.ChallengeStatusValid {
+		s.mu.Lock()
+		race := !s.raced
+		s.raced = true
+		s.mu.Unlock()
+		if race {
+			stored, storedRev, err := s.GetChallenge(ctx, challenge.ID)
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			stored.Status = nanoca.ChallengeStatusValid
+			stored.Validated = &now
+			stored.Reservation = nil
+			if err := s.Storage.PutChallenge(ctx, stored, storedRev); err != nil {
+				return err
+			}
+		}
 	}
-	if challenge.Status != nanoca.ChallengeStatusValid {
-		return nil
-	}
-	return fmt.Errorf("challenge status is valid, not processing: %w", nanoca.ErrStatusMismatch)
+	return s.Storage.PutChallenge(ctx, challenge, rev)
 }
 
 // Losing the terminal write to a concurrent validation is the same
@@ -1083,7 +1112,7 @@ func (s challengeValidRacedStorage) SettleChallenge(ctx context.Context, challen
 func TestChallengeValidStatusMismatchReportsState(t *testing.T) {
 	t.Parallel()
 
-	storage := challengeValidRacedStorage{Storage: newTestStorage(t)}
+	storage := &challengeValidRacedStorage{Storage: newTestStorage(t)}
 	ts := newStorageTestServer(t, storage, stubIssuer{})
 
 	client := newACMEClient(t, ts)
@@ -1096,14 +1125,31 @@ func TestChallengeValidStatusMismatchReportsState(t *testing.T) {
 	}
 }
 
-// orderStatusMismatchStorage rejects every guarded status transition, as
-// when another request has already settled the order.
-type orderStatusMismatchStorage struct {
+// orderStatusRacedStorage lands the same transition through a rival write
+// first, so the guarded transition loses its conditional write and the
+// re-read finds the work already done.
+type orderStatusRacedStorage struct {
 	nanoca.Storage
+	mu    sync.Mutex
+	raced bool
 }
 
-func (s orderStatusMismatchStorage) SetOrderStatus(_ context.Context, _, from, _ string) error {
-	return fmt.Errorf("order status is valid, not %s: %w", from, nanoca.ErrStatusMismatch)
+func (s *orderStatusRacedStorage) PutOrder(ctx context.Context, order *nanoca.Order, rev nanoca.Revision) error {
+	s.mu.Lock()
+	race := !s.raced
+	s.raced = true
+	s.mu.Unlock()
+	if race {
+		stored, storedRev, err := s.GetOrder(ctx, order.ID)
+		if err != nil {
+			return err
+		}
+		stored.Status = order.Status
+		if err := s.Storage.PutOrder(ctx, stored, storedRev); err != nil {
+			return err
+		}
+	}
+	return s.Storage.PutOrder(ctx, order, rev)
 }
 
 // updateOrderStatus tolerates losing the transition race, but it must not
@@ -1113,7 +1159,7 @@ func TestOrderStatusChangeLoggedOnlyOnTransition(t *testing.T) {
 
 	var logs syncBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	ts, _ := newTestServer(t, testServerConfig{logger: logger, issuer: stubIssuer{}, storage: orderStatusMismatchStorage{Storage: newTestStorage(t)}})
+	ts, _ := newTestServer(t, testServerConfig{logger: logger, issuer: stubIssuer{}, storage: &orderStatusRacedStorage{Storage: newTestStorage(t)}})
 
 	client := newACMEClient(t, ts)
 	_, chal := pendingChallenge(t, client, "settled-device")
@@ -1204,9 +1250,16 @@ func TestOrderRecoversFromAbandonedReservation(t *testing.T) {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 
+	// A dead CA instance left the order processing under its reservation.
 	orderID := path.Base(order.URI)
-	if err := storage.ReserveOrderFinalize(t.Context(), orderID, "dead-instance", time.Minute); err != nil {
-		t.Fatalf("ReserveOrderFinalize() error = %v", err)
+	abandoned, rev, err := storage.GetOrder(t.Context(), orderID)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	abandoned.Status = nanoca.OrderStatusProcessing
+	abandoned.Reservation = &nanoca.Reservation{Token: "dead-instance", ReservedAt: time.Now()}
+	if err := storage.PutOrder(t.Context(), abandoned, rev); err != nil {
+		t.Fatalf("PutOrder() error = %v", err)
 	}
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -1244,10 +1297,10 @@ func (s *authzDemotingStorage) arm() {
 	s.mu.Unlock()
 }
 
-func (s *authzDemotingStorage) GetAuthorization(ctx context.Context, id string) (*nanoca.Authorization, error) {
-	authz, err := s.Storage.GetAuthorization(ctx, id)
+func (s *authzDemotingStorage) GetAuthorization(ctx context.Context, id string) (*nanoca.Authorization, nanoca.Revision, error) {
+	authz, rev, err := s.Storage.GetAuthorization(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	s.mu.Lock()
 	armed := s.armed
@@ -1255,7 +1308,7 @@ func (s *authzDemotingStorage) GetAuthorization(ctx context.Context, id string) 
 	if armed {
 		authz.Status = nanoca.AuthzStatusPending
 	}
-	return authz, nil
+	return authz, rev, nil
 }
 
 // The order only reached ready through a valid authorization, so a
@@ -1293,7 +1346,7 @@ func TestFinalizeRefusesOrderWithoutValidAuthz(t *testing.T) {
 	t.Error("finalize issued a certificate without the attested identifiers")
 }
 
-// The stored authorization names its challenges by ID and reads compose the
+// The stored authorization names its challenges by ID; reads compose the
 // wire-format challenges from the challenge records, so a settled
 // authorization always reflects the live challenge state.
 func TestSettledAuthorizationComposesChallenges(t *testing.T) {
@@ -1308,33 +1361,57 @@ func TestSettledAuthorizationComposesChallenges(t *testing.T) {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 
-	authz, err := storage.GetAuthorization(t.Context(), path.Base(order.AuthzURLs[0]))
+	stored, _, err := storage.GetAuthorization(t.Context(), path.Base(order.AuthzURLs[0]))
 	if err != nil {
 		t.Fatalf("GetAuthorization() error = %v", err)
 	}
-	if authz.Status != nanoca.AuthzStatusValid {
-		t.Fatalf("authorization status = %q, want %q", authz.Status, nanoca.AuthzStatusValid)
+	if stored.Status != nanoca.AuthzStatusValid {
+		t.Fatalf("authorization status = %q, want %q", stored.Status, nanoca.AuthzStatusValid)
 	}
-	if len(authz.ChallengeIDs) != 1 {
-		t.Fatalf("authorization challenge IDs = %v, want one", authz.ChallengeIDs)
+	if len(stored.ChallengeIDs) != 1 {
+		t.Fatalf("stored challenge IDs = %v, want one", stored.ChallengeIDs)
 	}
-	if len(authz.Challenges) != 1 {
-		t.Fatalf("composed challenges = %d, want 1", len(authz.Challenges))
+	if len(stored.Challenges) != 0 {
+		t.Errorf("stored authorization embeds %d challenge copies, want none", len(stored.Challenges))
 	}
-	if got := authz.Challenges[0]; got.ID != authz.ChallengeIDs[0] || got.Status != nanoca.ChallengeStatusValid {
-		t.Errorf("composed challenge = %q status %q, want %q status %q", got.ID, got.Status, authz.ChallengeIDs[0], nanoca.ChallengeStatusValid)
+
+	wire, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
+	if err != nil {
+		t.Fatalf("client GetAuthorization() error = %v", err)
+	}
+	if len(wire.Challenges) != 1 || wire.Challenges[0].Status != acme.StatusValid {
+		t.Errorf("wire challenges = %+v, want one valid challenge", wire.Challenges)
 	}
 }
 
 // completeOrderRacedStorage simulates a zombie finalize whose lease lapsed
-// mid-issuance: by the time its CompleteOrder write lands, a retry has
-// reclaimed the reservation, so the write reports ErrReserved.
+// mid-issuance: a rival reclaims the reservation before the completion
+// write lands, so the write conflicts and the re-read finds the
+// reservation held by another token.
 type completeOrderRacedStorage struct {
 	nanoca.Storage
+	mu    sync.Mutex
+	raced bool
 }
 
-func (s completeOrderRacedStorage) CompleteOrder(context.Context, *nanoca.Order, *nanoca.Certificate, string) error {
-	return fmt.Errorf("order reservation is held by another token: %w", nanoca.ErrReserved)
+func (s *completeOrderRacedStorage) PutOrder(ctx context.Context, order *nanoca.Order, rev nanoca.Revision) error {
+	if order.Status == nanoca.OrderStatusValid {
+		s.mu.Lock()
+		race := !s.raced
+		s.raced = true
+		s.mu.Unlock()
+		if race {
+			stored, storedRev, err := s.GetOrder(ctx, order.ID)
+			if err != nil {
+				return err
+			}
+			stored.Reservation = &nanoca.Reservation{Token: "rival", ReservedAt: time.Now()}
+			if err := s.Storage.PutOrder(ctx, stored, storedRev); err != nil {
+				return err
+			}
+		}
+	}
+	return s.Storage.PutOrder(ctx, order, rev)
 }
 
 // Losing the finalize reservation to a reclaiming retry is the same
@@ -1344,7 +1421,7 @@ func (s completeOrderRacedStorage) CompleteOrder(context.Context, *nanoca.Order,
 func TestFinalizeCompletionRaceNonRetriable(t *testing.T) {
 	t.Parallel()
 
-	storage := completeOrderRacedStorage{Storage: newTestStorage(t)}
+	storage := &completeOrderRacedStorage{Storage: newTestStorage(t)}
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)

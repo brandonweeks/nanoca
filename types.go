@@ -201,7 +201,9 @@ type Authorization struct {
 	// ChallengeIDs names the authorization's challenges; the stored record
 	// carries only the IDs. Challenges is the ACME wire field, composed
 	// from the challenge records on read and never persisted, so the
-	// copies cannot drift from the records they mirror.
+	// copies cannot drift from the records they mirror. The parent carries
+	// the IDs rather than the backend deriving them from Challenge.AuthzID,
+	// so Storage never needs a lookup by field beyond GetAccountByKey.
 	ChallengeIDs []string    `json:"challengeIds,omitempty"`
 	Challenges   []Challenge `json:"challenges"`
 	Wildcard     bool        `json:"wildcard,omitempty"`

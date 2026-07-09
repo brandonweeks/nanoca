@@ -23,7 +23,9 @@ type CA struct {
 	nonceExpiry      time.Duration
 	reservationLease time.Duration
 
-	storage Storage
+	// storage wraps the configured backend with the reservation and
+	// status-transition machine; handlers never touch the backend directly.
+	storage *storageMachine
 }
 
 type Option func(*CA)
@@ -91,7 +93,7 @@ func New(logger *slog.Logger, issuer CertificateIssuer, authorizer Authorizer, s
 		logger:            logger,
 		certificateIssuer: issuer,
 		authorizer:        authorizer,
-		storage:           storage,
+		storage:           newStorageMachine(storage),
 		baseURL:           baseURL,
 		nonceExpiry:       time.Hour,
 		reservationLease:  time.Minute,
@@ -143,7 +145,7 @@ func (ca *CA) generateNonce(ctx context.Context) (string, error) {
 		CreatedAt: time.Now(),
 	}
 
-	if err := ca.storage.CreateNonce(ctx, nonceObj); err != nil {
+	if err := ca.storage.CreateNonce(ctx, nonceObj, ca.nonceExpiry); err != nil {
 		return "", fmt.Errorf("failed to store nonce: %w", err)
 	}
 
