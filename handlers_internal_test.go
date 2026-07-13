@@ -57,6 +57,7 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	order := &Order{ID: "o1", Status: OrderStatusProcessing, AuthorizationIDs: []string{"z1"}, CertificateID: "cert1", Reservation: reservation()}
 	challenge := &Challenge{ID: "c1", Status: ChallengeStatusValid, Attestation: attestation, Reservation: reservation()}
 	authz := &Authorization{ID: "a1", ChallengeIDs: []string{"c1"}, Challenges: []Challenge{{ID: "c1", Attestation: attestation, Reservation: reservation()}}}
+	account := &Account{ID: "acct1", KeyThumbprint: "thumb", OrderIDs: []string{"o1"}}
 
 	for name, tc := range map[string]struct {
 		data     any
@@ -65,11 +66,12 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 		"order":         {order, []string{`"/authz/z1"`, `"/order/o1/finalize"`, `"/certificate/cert1"`}},
 		"challenge":     {challenge, []string{`"/challenge/c1"`}},
 		"authorization": {authz, []string{`"/challenge/c1"`}},
+		"account":       {account, []string{`"/account/acct1/orders"`}},
 	} {
 		rec := httptest.NewRecorder()
 		ca.writeJSONResponse(t.Context(), rec, http.StatusOK, tc.data, "")
 		body := rec.Body.String()
-		for _, field := range []string{"reservation", "attestation", "challengeIds", "authorizationIds", "certificateId"} {
+		for _, field := range []string{"reservation", "attestation", "challengeIds", "authorizationIds", "certificateId", "orderIds", "keyThumbprint"} {
 			if strings.Contains(body, field) {
 				t.Errorf("%s response leaks %s state:\n%s", name, field, body)
 			}
@@ -89,5 +91,8 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	}
 	if order.AuthorizationIDs == nil || order.CertificateID == "" {
 		t.Error("presenting mutated the caller's ID fields")
+	}
+	if account.OrderIDs == nil || account.KeyThumbprint == "" {
+		t.Error("presenting mutated the caller's account fields")
 	}
 }

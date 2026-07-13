@@ -2,8 +2,13 @@ package nanoca_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"path"
 	"slices"
 	"sync"
@@ -217,5 +222,56 @@ func TestFinalizeRefusesOrderWithExpiredAuthorization(t *testing.T) {
 	}
 	if got.Status != acme.StatusInvalid {
 		t.Errorf("order status after refused finalize = %q, want %q", got.Status, acme.StatusInvalid)
+	}
+}
+
+// RFC 8555 Section 7.1.2.1 has the order list omit invalid orders, and
+// polling an order with an expired authorization settles and reports it
+// invalid; the list must judge the order the same way a poll would.
+func TestOrdersListOmitsOrderWithExpiredAuthorization(t *testing.T) {
+	t.Parallel()
+
+	storage := newTestStorage(t)
+	ts, _ := newTestServer(t, testServerConfig{storage: storage})
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	client := &acme.Client{
+		DirectoryURL: ts.URL + "/directory",
+		HTTPClient:   ts.Client(),
+		Key:          key,
+		RetryBackoff: func(int, *http.Request, *http.Response) time.Duration { return -1 },
+	}
+	acct, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS)
+	if err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+
+	order, _ := pendingChallenge(t, client, "list-expired-authz-device")
+	expireAuthorization(t, storage, order.AuthzURLs[0])
+
+	// Fetched before any poll, so the order is still stored pending.
+	status, body := signedPostAsGet(t, ts, key, acct.URI, acct.OrdersURL)
+	if status != http.StatusOK {
+		t.Fatalf("orders fetch status = %d, body: %s", status, body)
+	}
+	var list struct {
+		Orders []string `json:"orders"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("failed to decode orders list: %v", err)
+	}
+	if slices.Contains(list.Orders, order.URI) {
+		t.Errorf("orders list includes %q, want it omitted as invalid", order.URI)
+	}
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusInvalid {
+		t.Errorf("order poll status = %q, want %q", got.Status, acme.StatusInvalid)
 	}
 }

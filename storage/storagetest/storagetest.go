@@ -178,6 +178,7 @@ func testRoundTrip(t *testing.T, s nanoca.Storage) {
 		KeyThumbprint: "thumb-1",
 		Status:        "valid",
 		Contact:       []string{"mailto:admin@example.com"},
+		OrderIDs:      []string{"o1"},
 		CreatedAt:     written,
 	}
 	if err := s.CreateAccount(ctx, account); err != nil {

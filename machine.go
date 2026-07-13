@@ -148,15 +148,11 @@ func (m *storageMachine) GetAccountByKey(ctx context.Context, keyThumbprint stri
 	return account, err
 }
 
-// UpdateAccount overwrites the stored account: the last writer wins, as
-// long as the account still exists.
-func (m *storageMachine) UpdateAccount(ctx context.Context, account *Account) error {
-	return cas(ctx, m.b.GetAccount, m.b.PutAccount, account.ID, func(stored *Account) error {
-		*stored = *account
-		return nil
-	})
-}
-
+// CreateOrder stores the order tree and names the order on its account.
+// The tree is written first, unconditionally; the account write is the
+// commit point that makes the order reachable from the account's order
+// list, so a failure leaves the tree stored but named by no account, like
+// a certificate whose completion lost the order write.
 func (m *storageMachine) CreateOrder(ctx context.Context, order *Order, authzs []*Authorization, challenges []*Challenge) error {
 	// The composed wire fields are never persisted; a stored record names
 	// its children by ID.
@@ -176,7 +172,13 @@ func (m *storageMachine) CreateOrder(ctx context.Context, order *Order, authzs [
 		c.URL = ""
 		strippedChallenges[i] = &c
 	}
-	return m.b.CreateOrder(ctx, &o, strippedAuthzs, strippedChallenges)
+	if err := m.b.CreateOrder(ctx, &o, strippedAuthzs, strippedChallenges); err != nil {
+		return err
+	}
+	return cas(ctx, m.b.GetAccount, m.b.PutAccount, order.AccountID, func(account *Account) error {
+		account.OrderIDs = append(account.OrderIDs, order.ID)
+		return nil
+	})
 }
 
 func (m *storageMachine) GetOrder(ctx context.Context, id string) (*Order, error) {

@@ -123,8 +123,22 @@ type Account struct {
 	Status               string           `json:"status"`
 	Contact              []string         `json:"contact,omitempty"`
 	TermsOfServiceAgreed bool             `json:"termsOfServiceAgreed,omitempty"`
-	Orders               string           `json:"orders,omitempty"`
-	CreatedAt            time.Time        `json:"createdAt"`
+	// OrderIDs names the account's orders, appended as each order is
+	// created; the stored record carries only the IDs, so Storage never
+	// needs a lookup by Order.AccountID. The list is append-only and never
+	// pruned, so the account record and the order list fetch grow with
+	// every order the account creates. Orders is the ACME wire field
+	// required by RFC 8555 Section 7.1.2, the URL of the account's order
+	// list, composed from the account ID on read and never persisted.
+	OrderIDs  []string  `json:"orderIds,omitempty"`
+	Orders    string    `json:"orders"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// OrdersList is the response body of the account orders resource, RFC 8555
+// Section 7.1.2.1.
+type OrdersList struct {
+	Orders []string `json:"orders"`
 }
 
 type AccountRequest struct {

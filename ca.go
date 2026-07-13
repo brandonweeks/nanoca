@@ -128,6 +128,7 @@ func (ca *CA) Handler() http.Handler {
 	mux.HandleFunc(prefix+"/directory", ca.handleDirectory)
 	mux.HandleFunc(prefix+"/new-nonce", ca.handleNewNonce)
 	mux.HandleFunc(prefix+"/new-account", ca.handleNewAccount)
+	mux.HandleFunc(prefix+"/account/", ca.handleAccount)
 	mux.HandleFunc(prefix+"/new-order", ca.handleNewOrder)
 	mux.HandleFunc(prefix+"/order/", ca.handleOrder)
 	mux.HandleFunc(prefix+"/authz/", ca.handleAuthorization)

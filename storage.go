@@ -71,9 +71,9 @@ import (
 //
 // A backend must not impose field-presence constraints of its own: any
 // record whose ID is set is storable, even with every other field zero.
-// Authorization.Challenges, Order.Authorizations, Order.Finalize,
-// Order.Certificate, and Challenge.URL are composed by the CA and never
-// reach a backend populated.
+// Account.Orders, Authorization.Challenges, Order.Authorizations,
+// Order.Finalize, Order.Certificate, and Challenge.URL are composed by
+// the CA and never reach a backend populated.
 //
 // A backend needs no clock for correctness: nonce expiry and reservation
 // leases are judged by the CA processes sharing the store, so the lease

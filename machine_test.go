@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +16,21 @@ func newTestMachine(t *testing.T) (*storageMachine, *MemoryStorage) {
 	return newStorageMachine(backend), backend
 }
 
+// createAccountRecord provisions the account a fixture order is named on;
+// CreateOrder errors when the order's account is missing.
+func createAccountRecord(t *testing.T, m *storageMachine, id string) {
+	t.Helper()
+	if err := m.CreateAccount(t.Context(), &Account{ID: id}); err != nil && !errors.Is(err, ErrAccountExists) {
+		t.Fatalf("CreateAccount() error = %v", err)
+	}
+}
+
 func createOrderRecord(t *testing.T, m *storageMachine, order *Order) {
 	t.Helper()
+	if order.AccountID == "" {
+		order.AccountID = "account-for-" + order.ID
+	}
+	createAccountRecord(t, m, order.AccountID)
 	if err := m.CreateOrder(t.Context(), order, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
@@ -24,7 +38,8 @@ func createOrderRecord(t *testing.T, m *storageMachine, order *Order) {
 
 func createChallengeRecord(t *testing.T, m *storageMachine, challenge *Challenge) {
 	t.Helper()
-	order := &Order{ID: "order-for-" + challenge.ID, Status: OrderStatusPending}
+	order := &Order{ID: "order-for-" + challenge.ID, Status: OrderStatusPending, AccountID: "account-for-" + challenge.ID}
+	createAccountRecord(t, m, order.AccountID)
 	if err := m.CreateOrder(t.Context(), order, nil, []*Challenge{challenge}); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
@@ -386,7 +401,8 @@ func TestMachineSettleAuthorization(t *testing.T) {
 	m, _ := newTestMachine(t)
 	ctx := t.Context()
 
-	order := &Order{ID: "o1", Status: OrderStatusPending}
+	createAccountRecord(t, m, "a1")
+	order := &Order{ID: "o1", AccountID: "a1", Status: OrderStatusPending}
 	authz := &Authorization{ID: "z1", OrderID: "o1", Status: AuthzStatusPending, ChallengeIDs: []string{"c1"}}
 	challenge := &Challenge{ID: "c1", AuthzID: "z1", Status: ChallengeStatusValid}
 	if err := m.CreateOrder(ctx, order, []*Authorization{authz}, []*Challenge{challenge}); err != nil {
@@ -433,7 +449,8 @@ func TestMachineCreateOrderStripsComposedChallenges(t *testing.T) {
 		Challenges:   []Challenge{{ID: "c1", Attestation: []byte("blob")}},
 	}
 	challenge := &Challenge{ID: "c1", AuthzID: "z1", Status: ChallengeStatusPending}
-	if err := m.CreateOrder(ctx, &Order{ID: "o1"}, []*Authorization{authz}, []*Challenge{challenge}); err != nil {
+	createAccountRecord(t, m, "a1")
+	if err := m.CreateOrder(ctx, &Order{ID: "o1", AccountID: "a1"}, []*Authorization{authz}, []*Challenge{challenge}); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 
@@ -446,6 +463,33 @@ func TestMachineCreateOrderStripsComposedChallenges(t *testing.T) {
 	}
 	if len(stored.ChallengeIDs) != 1 || stored.ChallengeIDs[0] != "c1" {
 		t.Errorf("stored challenge IDs = %v, want [c1]", stored.ChallengeIDs)
+	}
+}
+
+func TestMachineCreateOrderNamesOrderOnAccount(t *testing.T) {
+	t.Parallel()
+
+	m, backend := newTestMachine(t)
+	ctx := t.Context()
+
+	createAccountRecord(t, m, "a1")
+	if err := m.CreateOrder(ctx, &Order{ID: "o1", AccountID: "a1"}, nil, nil); err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+	if err := m.CreateOrder(ctx, &Order{ID: "o2", AccountID: "a1"}, nil, nil); err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+
+	stored, _, err := backend.GetAccount(ctx, "a1")
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if !slices.Equal(stored.OrderIDs, []string{"o1", "o2"}) {
+		t.Errorf("account order IDs = %v, want [o1 o2]", stored.OrderIDs)
+	}
+
+	if err := m.CreateOrder(ctx, &Order{ID: "o3", AccountID: "ghost"}, nil, nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("CreateOrder(missing account) error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -495,9 +539,7 @@ func TestMachineRetriesOnConflict(t *testing.T) {
 	m := newStorageMachine(backend)
 	ctx := t.Context()
 
-	if err := m.CreateOrder(ctx, &Order{ID: "o1", Status: OrderStatusPending}, nil, nil); err != nil {
-		t.Fatalf("CreateOrder() error = %v", err)
-	}
+	createOrderRecord(t, m, &Order{ID: "o1", Status: OrderStatusPending})
 	if err := m.SetOrderStatus(ctx, "o1", OrderStatusPending, OrderStatusReady); err != nil {
 		t.Fatalf("SetOrderStatus() error = %v", err)
 	}
@@ -517,9 +559,7 @@ func TestMachineRetryStopsOnCanceledContext(t *testing.T) {
 	backend := &conflictingStorage{Storage: NewMemoryStorage(), remaining: 1 << 30}
 	m := newStorageMachine(backend)
 
-	if err := m.CreateOrder(t.Context(), &Order{ID: "o1", Status: OrderStatusPending}, nil, nil); err != nil {
-		t.Fatalf("CreateOrder() error = %v", err)
-	}
+	createOrderRecord(t, m, &Order{ID: "o1", Status: OrderStatusPending})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -565,9 +605,7 @@ func TestMachineReclassifiesLostReserve(t *testing.T) {
 	m := newStorageMachine(backend)
 	ctx := t.Context()
 
-	if err := m.CreateOrder(ctx, &Order{ID: "o1", Status: OrderStatusReady}, nil, nil); err != nil {
-		t.Fatalf("CreateOrder() error = %v", err)
-	}
+	createOrderRecord(t, m, &Order{ID: "o1", Status: OrderStatusReady})
 	if err := m.ReserveOrderFinalize(ctx, "o1", "mine", time.Minute); !errors.Is(err, ErrReserved) {
 		t.Errorf("ReserveOrderFinalize(raced) error = %v, want ErrReserved", err)
 	}

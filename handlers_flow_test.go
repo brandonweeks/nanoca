@@ -8,14 +8,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/brandonweeks/nanoca"
 	nullauthorizer "github.com/brandonweeks/nanoca/authorizers/null"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/crypto/acme"
 )
 
@@ -81,6 +85,153 @@ func nullAttObj(t *testing.T) string {
 		t.Fatalf("failed to marshal attestation: %v", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+type staticNonce string
+
+func (n staticNonce) Nonce() (string, error) { return string(n), nil }
+
+// signedPostAsGet issues a POST-as-GET (RFC 8555 Section 6.3): an
+// empty-payload JWS signed with the account key, carrying the account URL
+// as kid. x/crypto/acme has no orders-list call, so the fetch is built by
+// hand.
+func signedPostAsGet(t *testing.T, ts *httptest.Server, key *ecdsa.PrivateKey, kid, url string) (int, []byte) {
+	t.Helper()
+
+	nonce := fetchNonce(t, ts.Client(), ts.URL)
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.ES256, Key: jose.JSONWebKey{Key: key, KeyID: kid}},
+		&jose.SignerOptions{
+			NonceSource:  staticNonce(nonce),
+			ExtraHeaders: map[jose.HeaderKey]any{"url": url},
+		},
+	)
+	if err != nil {
+		t.Fatalf("failed to build signer: %v", err)
+	}
+	jws, err := signer.Sign([]byte{})
+	if err != nil {
+		t.Fatalf("failed to sign request: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(jws.FullSerialize()))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", joseContentType)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response: %v", err)
+	}
+	return resp.StatusCode, body
+}
+
+// RFC 8555 Section 7.1.2 requires the account object to carry the orders
+// URL, and clients may refuse an account without one before ever sending
+// newOrder. Both account responses must name a resolvable order list for
+// enrollment to complete.
+func TestAccountOrdersURLResolvable(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	client := &acme.Client{
+		DirectoryURL: ts.URL + "/directory",
+		HTTPClient:   ts.Client(),
+		Key:          key,
+		RetryBackoff: func(int, *http.Request, *http.Response) time.Duration { return -1 },
+	}
+
+	acct, err := client.Register(t.Context(), &acme.Account{}, acme.AcceptTOS)
+	if err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+	if acct.OrdersURL == "" {
+		t.Fatal("new-account response carries no orders URL")
+	}
+
+	existing, err := client.GetReg(t.Context(), "")
+	if err != nil {
+		t.Fatalf("GetReg() error = %v", err)
+	}
+	if existing.OrdersURL != acct.OrdersURL {
+		t.Errorf("existing-account orders URL = %q, want %q", existing.OrdersURL, acct.OrdersURL)
+	}
+
+	fetchOrders := func() []string {
+		t.Helper()
+		status, body := signedPostAsGet(t, ts, key, acct.URI, acct.OrdersURL)
+		if status != http.StatusOK {
+			t.Fatalf("orders fetch status = %d, body: %s", status, body)
+		}
+		var list struct {
+			Orders []string `json:"orders"`
+		}
+		if err := json.Unmarshal(body, &list); err != nil {
+			t.Fatalf("failed to decode orders list: %v", err)
+		}
+		return list.Orders
+	}
+
+	if orders := fetchOrders(); len(orders) != 0 {
+		t.Errorf("orders before any order = %v, want empty", orders)
+	}
+
+	order, chal := pendingChallenge(t, client, "orders-list-device")
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err != nil {
+		t.Fatalf("CreateOrderCert() error = %v", err)
+	}
+
+	if orders := fetchOrders(); !slices.Contains(orders, order.URI) {
+		t.Errorf("orders list = %v, want to contain %q", orders, order.URI)
+	}
+}
+
+func TestOrdersListBelongsToAnotherAccount(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+
+	ownerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	owner := &acme.Client{DirectoryURL: ts.URL + "/directory", HTTPClient: ts.Client(), Key: ownerKey}
+	acct, err := owner.Register(t.Context(), &acme.Account{}, acme.AcceptTOS)
+	if err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+
+	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	other := &acme.Client{DirectoryURL: ts.URL + "/directory", HTTPClient: ts.Client(), Key: otherKey}
+	otherAcct, err := other.Register(t.Context(), &acme.Account{}, acme.AcceptTOS)
+	if err != nil {
+		t.Fatalf("failed to register account: %v", err)
+	}
+
+	if status, _ := signedPostAsGet(t, ts, otherKey, otherAcct.URI, acct.OrdersURL); status != http.StatusForbidden {
+		t.Errorf("cross-account orders fetch status = %d, want %d", status, http.StatusForbidden)
+	}
+
+	// Only the order list is served under the account URL.
+	if status, _ := signedPostAsGet(t, ts, ownerKey, acct.URI, acct.URI); status != http.StatusBadRequest {
+		t.Errorf("account URL fetch status = %d, want %d", status, http.StatusBadRequest)
+	}
 }
 
 func TestIssuanceExtractsDeviceInfo(t *testing.T) {

@@ -152,7 +152,6 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 		Status:               "valid",
 		Contact:              accountReq.Contact,
 		TermsOfServiceAgreed: accountReq.TermsOfServiceAgreed,
-		Orders:               ca.url(fmt.Sprintf("/account/%s/orders", accountID)),
 		CreatedAt:            time.Now(),
 	}
 
@@ -179,15 +178,71 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 // existing account URL in Location, rather than a 201.
 func (ca *CA) writeExistingAccount(ctx context.Context, w http.ResponseWriter, account *Account) {
 	ctx = WithAccountID(ctx, account.ID)
-	if account.Orders == "" {
-		account.Orders = ca.url(fmt.Sprintf("/account/%s/orders", account.ID))
-		if err := ca.storage.UpdateAccount(ctx, account); err != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update account orders URL", "error", err)
-		}
-	}
-
 	w.Header().Set("Location", ca.url(fmt.Sprintf("/account/%s", account.ID)))
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, account)
+}
+
+// handleAccount serves the account's order list, RFC 8555 Section 7.1.2.1,
+// the resource the account object's orders field points at. No other
+// account operation is supported.
+func (ca *CA) handleAccount(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	segment := ca.extractPathSegment(r.URL.Path, "/account/")
+	accountID, ok := strings.CutSuffix(segment, "/orders")
+	if !ok || accountID == "" || strings.Contains(accountID, "/") {
+		ca.writeProblem(ctx, w, Malformed("Unsupported account operation"))
+		return
+	}
+
+	postData, prob := ca.verifyPOST(r, ca.lookupJWK)
+	if prob != nil {
+		ca.writeProblem(ctx, w, prob)
+		return
+	}
+	ctx = WithAccountID(ctx, postData.accountID)
+
+	if postData.accountID != accountID {
+		ca.writeProblem(ctx, w, Unauthorized("Orders do not belong to account"))
+		return
+	}
+
+	// Only POST-as-GET is supported; judged before the list is built, so a
+	// rejected request never triggers the settlement writes below.
+	if !postData.postAsGet {
+		ca.writeProblem(ctx, w, Malformed("Unsupported account operation"))
+		return
+	}
+
+	account, err := ca.getAccount(ctx, accountID)
+	if err != nil {
+		ca.writeProblem(ctx, w, lookupProblem(err, "Account"))
+		return
+	}
+
+	// RFC 8555 Section 7.1.2.1 has the list omit invalid orders, so each
+	// order is judged the way polling it would present it, including the
+	// pending recompute handleOrder runs: a settled authorization may have
+	// invalidated the order without any poll having written that down yet.
+	list := OrdersList{Orders: []string{}}
+	for _, orderID := range account.OrderIDs {
+		order, err := ca.storage.GetOrder(ctx, orderID)
+		if err != nil {
+			ca.writeProblem(ctx, w, InternalServerError("Failed to get order").WithCause(err))
+			return
+		}
+		if order.Status == OrderStatusPending {
+			ca.updateOrderStatus(ctx, order)
+		}
+		order.presentLapsed(ca.reservationLease)
+		order.presentExpired()
+		if order.Status == OrderStatusInvalid {
+			continue
+		}
+		list.Orders = append(list.Orders, ca.url(fmt.Sprintf("/order/%s", orderID)))
+	}
+
+	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, list)
 }
 
 func (ca *CA) extractJWK(_ *http.Request, jws *jose.JSONWebSignature) (*jose.JSONWebKey, *Problem) {
@@ -634,6 +689,12 @@ func (ca *CA) present(data any) any {
 		presented.Reservation = nil
 		presented.Attestation = nil
 		presented.URL = ca.url(fmt.Sprintf("/challenge/%s", v.ID))
+		return &presented
+	case *Account:
+		presented := *v
+		presented.KeyThumbprint = ""
+		presented.OrderIDs = nil
+		presented.Orders = ca.url(fmt.Sprintf("/account/%s/orders", v.ID))
 		return &presented
 	case *Authorization:
 		presented := *v
