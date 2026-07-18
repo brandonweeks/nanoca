@@ -59,9 +59,9 @@ func (v *gateVerifier) Verify(context.Context, nanoca.AttestationStatement, []by
 	}, nil
 }
 
-// authzWriteParkingStorage parks armed SettleAuthorization calls until the
-// test releases them, so a stale authorization write can be made to land
-// after a newer one.
+// authzWriteParkingStorage parks armed authorization writes until the test
+// releases them, so a stale authorization write can be made to land after
+// a newer one.
 type authzWriteParkingStorage struct {
 	nanoca.Storage
 	mu     sync.Mutex
@@ -75,7 +75,7 @@ func (s *authzWriteParkingStorage) park(n int) {
 	s.mu.Unlock()
 }
 
-func (s *authzWriteParkingStorage) SettleAuthorization(ctx context.Context, authz *nanoca.Authorization) error {
+func (s *authzWriteParkingStorage) PutAuthorization(ctx context.Context, authz *nanoca.Authorization, rev nanoca.Revision) error {
 	s.mu.Lock()
 	if s.toPark > 0 {
 		s.toPark--
@@ -86,7 +86,7 @@ func (s *authzWriteParkingStorage) SettleAuthorization(ctx context.Context, auth
 	} else {
 		s.mu.Unlock()
 	}
-	return s.Storage.SettleAuthorization(ctx, authz)
+	return s.Storage.PutAuthorization(ctx, authz, rev)
 }
 
 // A zombie validation whose invalid settlement is rejected has no
@@ -341,111 +341,6 @@ func TestOrderReadyRetriesAfterStatusWriteFailure(t *testing.T) {
 	}
 }
 
-// challengeInvalidFailingStorage fails the invalid settlement with a plain
-// backend error while armed, so failChallenge takes its backend-error branch
-// and never learns another request has claimed the challenge.
-type challengeInvalidFailingStorage struct {
-	nanoca.Storage
-	mu    sync.Mutex
-	armed bool
-}
-
-func (s *challengeInvalidFailingStorage) arm() {
-	s.mu.Lock()
-	s.armed = true
-	s.mu.Unlock()
-}
-
-func (s *challengeInvalidFailingStorage) SettleChallenge(ctx context.Context, challenge *nanoca.Challenge, reservationToken string) error {
-	s.mu.Lock()
-	armed := s.armed
-	s.mu.Unlock()
-	if armed && challenge.Status == nanoca.ChallengeStatusInvalid {
-		return errors.New("backend unavailable")
-	}
-	return s.Storage.SettleChallenge(ctx, challenge, reservationToken)
-}
-
-// A zombie can also lose its claim without being told: when its invalid
-// settlement fails with a backend error instead of a token rejection, it
-// goes on to recompute the authorization from reads taken
-// before the reclaiming retry settled. That stale write must not revert
-// the settled authorization any more than the token-rejection variant
-// (TestZombieInvalidationDoesNotRevertSettledAuthz) may.
-func TestZombieBackendErrorDoesNotRevertSettledAuthz(t *testing.T) {
-	t.Parallel()
-
-	verifier := newGateVerifier()
-	failing := &challengeInvalidFailingStorage{Storage: newTestStorage(t)}
-	storage := &authzWriteParkingStorage{Storage: failing, parked: make(chan chan struct{}, 1)}
-	ts, _ := newTestServer(t, testServerConfig{
-		storage:   storage,
-		opts:      []nanoca.Option{nanoca.WithReservationLease(testReservationLease)},
-		verifiers: []nanoca.AttestationVerifier{verifier},
-	})
-
-	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "zombie-backend-device")
-
-	payload, err := json.Marshal(map[string]any{"attObj": attObjFor(t, "gate")})
-	if err != nil {
-		t.Fatalf("failed to marshal payload: %v", err)
-	}
-	chal.Payload = payload
-
-	zombieDone := make(chan error, 1)
-	go func() {
-		_, err := client.Accept(t.Context(), chal)
-		zombieDone <- err
-	}()
-	<-verifier.entered[0]
-
-	// The zombie holds the reservation inside its verifier; once the lease
-	// lapses, the retry reclaims it and parks inside its own verifier.
-	time.Sleep(2 * testReservationLease)
-	retryDone := make(chan error, 1)
-	go func() {
-		_, err := client.Accept(t.Context(), chal)
-		retryDone <- err
-	}()
-	<-verifier.entered[1]
-
-	// The zombie fails verification while the retry holds the reservation,
-	// but its settle write reports a backend error, not the token
-	// rejection. If it recomputes the authorization anyway, its stale
-	// write parks; if it treats the lost claim as settled, it finishes
-	// without writing.
-	failing.arm()
-	storage.park(1)
-	close(verifier.release[0])
-	var gate chan struct{}
-	select {
-	case gate = <-storage.parked:
-	case <-zombieDone:
-		storage.park(0)
-	}
-
-	close(verifier.release[1])
-	if err := <-retryDone; err != nil {
-		t.Fatalf("reclaiming Accept() error = %v, want success", err)
-	}
-
-	// The retry has settled: challenge valid, authorization valid, order
-	// ready. Any parked zombie write lands last.
-	if gate != nil {
-		close(gate)
-		<-zombieDone
-	}
-
-	authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
-	if err != nil {
-		t.Fatalf("GetAuthorization() error = %v", err)
-	}
-	if authz.Status != acme.StatusValid {
-		t.Errorf("authorization status after zombie write = %q, want %q", authz.Status, acme.StatusValid)
-	}
-}
-
 // authzSettleFailingStorage fails authorization settles while armed,
 // simulating a backend outage that begins between a challenge's terminal
 // write and the authorization promotion that follows.
@@ -461,14 +356,14 @@ func (s *authzSettleFailingStorage) setFail(fail bool) {
 	s.mu.Unlock()
 }
 
-func (s *authzSettleFailingStorage) SettleAuthorization(ctx context.Context, authz *nanoca.Authorization) error {
+func (s *authzSettleFailingStorage) PutAuthorization(ctx context.Context, authz *nanoca.Authorization, rev nanoca.Revision) error {
 	s.mu.Lock()
 	fail := s.fail
 	s.mu.Unlock()
 	if fail {
 		return errors.New("backend unavailable")
 	}
-	return s.Storage.SettleAuthorization(ctx, authz)
+	return s.Storage.PutAuthorization(ctx, authz, rev)
 }
 
 // Once the challenge is valid, promoting the authorization must not hinge

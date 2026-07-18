@@ -152,7 +152,6 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 		Status:               "valid",
 		Contact:              accountReq.Contact,
 		TermsOfServiceAgreed: accountReq.TermsOfServiceAgreed,
-		Orders:               ca.url(fmt.Sprintf("/account/%s/orders", accountID)),
 		CreatedAt:            time.Now(),
 	}
 
@@ -179,15 +178,71 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 // existing account URL in Location, rather than a 201.
 func (ca *CA) writeExistingAccount(ctx context.Context, w http.ResponseWriter, account *Account) {
 	ctx = WithAccountID(ctx, account.ID)
-	if account.Orders == "" {
-		account.Orders = ca.url(fmt.Sprintf("/account/%s/orders", account.ID))
-		if err := ca.storage.UpdateAccount(ctx, account); err != nil {
-			ca.logger.ErrorContext(ctx, "Failed to update account orders URL", "error", err)
-		}
-	}
-
 	w.Header().Set("Location", ca.url(fmt.Sprintf("/account/%s", account.ID)))
 	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, account)
+}
+
+// handleAccount serves the account's order list, RFC 8555 Section 7.1.2.1,
+// the resource the account object's orders field points at. No other
+// account operation is supported.
+func (ca *CA) handleAccount(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	segment := ca.extractPathSegment(r.URL.Path, "/account/")
+	accountID, ok := strings.CutSuffix(segment, "/orders")
+	if !ok || accountID == "" || strings.Contains(accountID, "/") {
+		ca.writeProblem(ctx, w, Malformed("Unsupported account operation"))
+		return
+	}
+
+	postData, prob := ca.verifyPOST(r, ca.lookupJWK)
+	if prob != nil {
+		ca.writeProblem(ctx, w, prob)
+		return
+	}
+	ctx = WithAccountID(ctx, postData.accountID)
+
+	if postData.accountID != accountID {
+		ca.writeProblem(ctx, w, Unauthorized("Orders do not belong to account"))
+		return
+	}
+
+	// Only POST-as-GET is supported; judged before the list is built, so a
+	// rejected request never triggers the settlement writes below.
+	if !postData.postAsGet {
+		ca.writeProblem(ctx, w, Malformed("Unsupported account operation"))
+		return
+	}
+
+	account, err := ca.getAccount(ctx, accountID)
+	if err != nil {
+		ca.writeProblem(ctx, w, lookupProblem(err, "Account"))
+		return
+	}
+
+	// RFC 8555 Section 7.1.2.1 has the list omit invalid orders, so each
+	// order is judged the way polling it would present it, including the
+	// pending recompute handleOrder runs: a settled authorization may have
+	// invalidated the order without any poll having written that down yet.
+	list := OrdersList{Orders: []string{}}
+	for _, orderID := range account.OrderIDs {
+		order, err := ca.storage.GetOrder(ctx, orderID)
+		if err != nil {
+			ca.writeProblem(ctx, w, InternalServerError("Failed to get order").WithCause(err))
+			return
+		}
+		if order.Status == OrderStatusPending {
+			ca.updateOrderStatus(ctx, order)
+		}
+		order.presentLapsed(ca.reservationLease)
+		order.presentExpired()
+		if order.Status == OrderStatusInvalid {
+			continue
+		}
+		list.Orders = append(list.Orders, ca.url(fmt.Sprintf("/order/%s", orderID)))
+	}
+
+	ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, list)
 }
 
 func (ca *CA) extractJWK(_ *http.Request, jws *jose.JSONWebSignature) (*jose.JSONWebKey, *Problem) {
@@ -410,6 +465,7 @@ func (ca *CA) handleOrder(w http.ResponseWriter, r *http.Request) {
 	// finalize; once the reservation lapses the order must read as ready
 	// again so a retry can reclaim it.
 	order.presentLapsed(ca.reservationLease)
+	order.presentExpired()
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, order)
@@ -478,6 +534,7 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 	for i := range authz.Challenges {
 		authz.Challenges[i].presentLapsed(ca.reservationLease)
 	}
+	authz.presentExpired()
 
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, authz)
@@ -545,6 +602,11 @@ func (ca *CA) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if authz.expired() {
+		ca.writeProblem(ctx, w, Malformed("Authorization has expired"))
+		return
+	}
+
 	ca.handleChallengeResponse(ctx, w, challenge, authz, postData)
 }
 
@@ -570,21 +632,15 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orders, err := ca.storage.GetOrdersByAccount(ctx, postData.accountID)
-	if err != nil {
-		ca.writeProblem(ctx, w, InternalServerError("Failed to get orders").WithCause(err))
+	// An order that does not reference the certificate back marks a
+	// certificate left behind by a failed or superseded finalize; it
+	// belongs to no one.
+	order, err := ca.storage.GetOrder(ctx, cert.OrderID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		ca.writeProblem(ctx, w, InternalServerError("Failed to get order").WithCause(err))
 		return
 	}
-
-	var order *Order
-	for _, o := range orders {
-		if o.Certificate == ca.url(fmt.Sprintf("/certificate/%s", certID)) {
-			order = o
-			break
-		}
-	}
-
-	if order == nil || order.AccountID != postData.accountID {
+	if err != nil || order.AccountID != postData.accountID || order.CertificateID != cert.ID {
 		ca.writeProblem(ctx, w, Unauthorized("Certificate does not belong to this account"))
 		return
 	}
@@ -608,36 +664,55 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scrubStorageState strips storage-internal state, the reservation, the
-// stored attestation object, and the challenge ID list, from a
-// client-facing copy; the ACME wire format has none of these fields.
-func scrubStorageState(data any) any {
+// present composes the ACME wire URLs from the stored IDs and strips
+// storage-internal state, the reservation, the stored attestation object,
+// and the ID fields, from a client-facing copy; the ACME wire format has
+// none of the stored fields.
+func (ca *CA) present(data any) any {
 	switch v := data.(type) {
 	case *Order:
-		scrubbed := *v
-		scrubbed.Reservation = nil
-		return &scrubbed
-	case *Challenge:
-		scrubbed := *v
-		scrubbed.Reservation = nil
-		scrubbed.Attestation = nil
-		return &scrubbed
-	case *Authorization:
-		scrubbed := *v
-		scrubbed.ChallengeIDs = nil
-		scrubbed.Challenges = slices.Clone(v.Challenges)
-		for i := range scrubbed.Challenges {
-			scrubbed.Challenges[i].Reservation = nil
-			scrubbed.Challenges[i].Attestation = nil
+		presented := *v
+		presented.Reservation = nil
+		presented.Authorizations = make([]string, len(v.AuthorizationIDs))
+		for i, id := range v.AuthorizationIDs {
+			presented.Authorizations[i] = ca.url(fmt.Sprintf("/authz/%s", id))
 		}
-		return &scrubbed
+		presented.AuthorizationIDs = nil
+		presented.Finalize = ca.url(fmt.Sprintf("/order/%s/finalize", v.ID))
+		if v.CertificateID != "" {
+			presented.Certificate = ca.url(fmt.Sprintf("/certificate/%s", v.CertificateID))
+		}
+		presented.CertificateID = ""
+		return &presented
+	case *Challenge:
+		presented := *v
+		presented.Reservation = nil
+		presented.Attestation = nil
+		presented.URL = ca.url(fmt.Sprintf("/challenge/%s", v.ID))
+		return &presented
+	case *Account:
+		presented := *v
+		presented.KeyThumbprint = ""
+		presented.OrderIDs = nil
+		presented.Orders = ca.url(fmt.Sprintf("/account/%s/orders", v.ID))
+		return &presented
+	case *Authorization:
+		presented := *v
+		presented.ChallengeIDs = nil
+		presented.Challenges = slices.Clone(v.Challenges)
+		for i := range presented.Challenges {
+			presented.Challenges[i].Reservation = nil
+			presented.Challenges[i].Attestation = nil
+			presented.Challenges[i].URL = ca.url(fmt.Sprintf("/challenge/%s", presented.Challenges[i].ID))
+		}
+		return &presented
 	}
 	return data
 }
 
 func (ca *CA) writeJSONResponse(ctx context.Context, w http.ResponseWriter, statusCode int, data any, nonce string) {
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(scrubStorageState(data)); err != nil {
+	if err := json.NewEncoder(&buf).Encode(ca.present(data)); err != nil {
 		ca.writeProblem(ctx, w, InternalServerError("Failed to encode response").WithCause(err))
 		return
 	}
@@ -747,16 +822,15 @@ func jwkThumbprint(jwk *jose.JSONWebKey) (string, error) {
 func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderRequest) (*Order, error) {
 	orderID := ca.generateOrderID()
 
-	var authzURLs []string
+	var authzIDs []string
 	var authzs []*Authorization
 	var challenges []*Challenge
 
 	for _, identifier := range orderReq.Identifiers {
 		authzID := ca.generateAuthorizationID()
-		authzURL := ca.url(fmt.Sprintf("/authz/%s", authzID))
-		authzURLs = append(authzURLs, authzURL)
+		authzIDs = append(authzIDs, authzID)
 
-		expires := time.Now().Add(24 * time.Hour)
+		expires := time.Now().Add(ca.authzExpiry)
 		authz := &Authorization{
 			ID:         authzID,
 			AccountID:  accountID,
@@ -775,7 +849,6 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 				Type:    "device-attest-01",
 				Status:  "pending",
 				Token:   ca.generateToken(),
-				URL:     ca.url(fmt.Sprintf("/challenge/%s", challengeID)),
 			}
 
 			challenges = append(challenges, challenge)
@@ -785,14 +858,15 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 		authzs = append(authzs, authz)
 	}
 
+	orderExpires := time.Now().Add(ca.orderExpiry)
 	order := &Order{
-		ID:             orderID,
-		AccountID:      accountID,
-		Status:         "pending",
-		Identifiers:    orderReq.Identifiers,
-		Authorizations: authzURLs,
-		Finalize:       ca.url(fmt.Sprintf("/order/%s/finalize", orderID)),
-		CreatedAt:      time.Now(),
+		ID:               orderID,
+		AccountID:        accountID,
+		Status:           "pending",
+		Expires:          &orderExpires,
+		Identifiers:      orderReq.Identifiers,
+		AuthorizationIDs: authzIDs,
+		CreatedAt:        time.Now(),
 	}
 
 	if err := ca.storage.CreateOrder(ctx, order, authzs, challenges); err != nil {
@@ -963,23 +1037,26 @@ func (ca *CA) failChallenge(ctx context.Context, w http.ResponseWriter, challeng
 // stored record — keeps this recomputation from overwriting a status a
 // concurrent finalize has since written.
 func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
-	if order.Status != OrderStatusPending {
+	// An expired order is presented invalid and gated out of finalize;
+	// promoting it here would durably contradict that.
+	if order.Status != OrderStatusPending || order.expired() {
 		return
 	}
 
 	// An order with no authorizations must not count as valid.
-	allValid := len(order.Authorizations) > 0
+	allValid := len(order.AuthorizationIDs) > 0
 	anyInvalid := false
 
-	for _, authzURL := range order.Authorizations {
-		authzID := extractIDFromURL(authzURL, "/authz/")
+	for _, authzID := range order.AuthorizationIDs {
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
 			allValid = false
 			continue
 		}
 
-		if authz.Status == AuthzStatusInvalid {
+		// An expired authorization is a final state other than valid, so
+		// it settles the order as invalid per RFC 8555 Section 7.1.6.
+		if authz.Status == AuthzStatusInvalid || authz.expired() {
 			anyInvalid = true
 			break
 		}
@@ -1017,7 +1094,9 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 // stale reads from overwriting a settlement another request has since
 // written; a recompute that settles nothing writes nothing.
 func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorization) {
-	if authz.Status != AuthzStatusPending {
+	// An expired authorization is presented expired and its challenges are
+	// no longer answerable; settling it would durably contradict that.
+	if authz.Status != AuthzStatusPending || authz.expired() {
 		return
 	}
 
@@ -1111,6 +1190,13 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 		return nil, Unauthorized("Order does not belong to account")
 	}
 
+	// An expired order presents as invalid, so it is not ready to
+	// finalize. Judged before the reserve, no reservation is ever taken
+	// on an expired order.
+	if order.expired() {
+		return nil, OrderNotReady("Order has expired")
+	}
+
 	// The reservation is the persisted processing status under a lease, so
 	// exclusivity holds across CA processes sharing this storage, and a
 	// crashed holder is reclaimable once the lease lapses. The snapshot
@@ -1202,9 +1288,10 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
 	}
 	cert.ID = randomID(16)
+	cert.OrderID = order.ID
 
 	order.Status = OrderStatusValid
-	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.ID))
+	order.CertificateID = cert.ID
 	order.Reservation = nil
 	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
 		ca.logger.ErrorContext(ctx, "Leaving signed certificate unreferenced after failed completion", "serial_number", cert.SerialNumber, "error", err)
@@ -1255,11 +1342,18 @@ func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) e
 // heal — so it is refused as retriable rather than issued identity-less.
 func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceInfo, error) {
 	var deviceInfos []*DeviceInfo
-	for _, authzURL := range order.Authorizations {
-		authzID := extractIDFromURL(authzURL, "/authz/")
+	for _, authzID := range order.AuthorizationIDs {
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get authorization: %w", err)
+		}
+		// An expired authorization no longer vouches for its identity,
+		// even if it settled valid before the window closed. Skipping it
+		// would issue a certificate silently missing its SANs, so the
+		// finalize fails terminally instead; expiry cannot heal, and per
+		// RFC 8555 Section 7.1.6 the order it backs is invalid.
+		if authz.expired() {
+			return nil, Unauthorized("Authorization has expired")
 		}
 		if authz.Status != AuthzStatusValid {
 			continue
@@ -1322,11 +1416,4 @@ func (ca *CA) extractDeviceInfoFromChallenge(ctx context.Context, challenge *Cha
 	}
 
 	return deviceInfo, nil
-}
-
-func extractIDFromURL(url, prefix string) string {
-	if idx := strings.LastIndex(url, prefix); idx != -1 {
-		return url[idx+len(prefix):]
-	}
-	return ""
 }

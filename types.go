@@ -56,7 +56,12 @@ type Certificate struct {
 	*x509.Certificate `json:"-"`
 	// ID is the storage and URL identifier; the CA assigns a fresh random
 	// ID per finalize attempt.
-	ID           string   `json:"id"`
+	ID string `json:"id"`
+	// OrderID names the order the certificate was issued for. A fetch is
+	// authorized only when that order also references the certificate
+	// back, so a certificate left behind by a failed or superseded
+	// finalize is never served.
+	OrderID      string   `json:"orderId"`
 	Raw          []byte   `json:"raw"`
 	SerialNumber string   `json:"serialNumber"`
 	ChainRaw     [][]byte `json:"chainRaw,omitempty"`
@@ -118,8 +123,22 @@ type Account struct {
 	Status               string           `json:"status"`
 	Contact              []string         `json:"contact,omitempty"`
 	TermsOfServiceAgreed bool             `json:"termsOfServiceAgreed,omitempty"`
-	Orders               string           `json:"orders,omitempty"`
-	CreatedAt            time.Time        `json:"createdAt"`
+	// OrderIDs names the account's orders, appended as each order is
+	// created; the stored record carries only the IDs, so Storage never
+	// needs a lookup by Order.AccountID. The list is append-only and never
+	// pruned, so the account record and the order list fetch grow with
+	// every order the account creates. Orders is the ACME wire field
+	// required by RFC 8555 Section 7.1.2, the URL of the account's order
+	// list, composed from the account ID on read and never persisted.
+	OrderIDs  []string  `json:"orderIds,omitempty"`
+	Orders    string    `json:"orders"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// OrdersList is the response body of the account orders resource, RFC 8555
+// Section 7.1.2.1.
+type OrdersList struct {
+	Orders []string `json:"orders"`
 }
 
 type AccountRequest struct {
@@ -150,19 +169,26 @@ func (r *Reservation) Live(lease time.Duration) bool {
 }
 
 type Order struct {
-	ID             string       `json:"id"`
-	Status         string       `json:"status"`
-	Expires        *time.Time   `json:"expires,omitempty"`
-	Identifiers    []Identifier `json:"identifiers"`
-	NotBefore      *time.Time   `json:"notBefore,omitempty"`
-	NotAfter       *time.Time   `json:"notAfter,omitempty"`
-	Error          *Problem     `json:"error,omitempty"`
-	Authorizations []string     `json:"authorizations"`
-	Finalize       string       `json:"finalize"`
-	Certificate    string       `json:"certificate,omitempty"`
-	AccountID      string       `json:"accountId"`
-	CreatedAt      time.Time    `json:"createdAt"`
-	Reservation    *Reservation `json:"reservation,omitempty"`
+	ID          string       `json:"id"`
+	Status      string       `json:"status"`
+	Expires     *time.Time   `json:"expires,omitempty"`
+	Identifiers []Identifier `json:"identifiers"`
+	NotBefore   *time.Time   `json:"notBefore,omitempty"`
+	NotAfter    *time.Time   `json:"notAfter,omitempty"`
+	Error       *Problem     `json:"error,omitempty"`
+	// AuthorizationIDs and CertificateID name the order's authorizations
+	// and issued certificate; the stored record carries only the IDs.
+	// Authorizations, Finalize, and Certificate are the ACME wire fields,
+	// composed from the IDs on read and never persisted, so the stored
+	// record does not go stale if the base URL changes.
+	AuthorizationIDs []string     `json:"authorizationIds,omitempty"`
+	CertificateID    string       `json:"certificateId,omitempty"`
+	Authorizations   []string     `json:"authorizations"`
+	Finalize         string       `json:"finalize"`
+	Certificate      string       `json:"certificate,omitempty"`
+	AccountID        string       `json:"accountId"`
+	CreatedAt        time.Time    `json:"createdAt"`
+	Reservation      *Reservation `json:"reservation,omitempty"`
 }
 
 type OrderRequest struct {
@@ -188,6 +214,24 @@ func (o *Order) presentLapsed(lease time.Duration) {
 	}
 }
 
+func (o *Order) expired() bool {
+	return o.Expires != nil && time.Now().After(*o.Expires)
+}
+
+// presentExpired rewrites an expired pending or ready order to invalid,
+// per RFC 8555 Section 7.1.6. Presentation only: nothing is deleted; the
+// finalize gate keeps an expired order unusable. Called after
+// presentLapsed, it leaves a processing order alone (a live reservation
+// passed the gate before the window closed and is allowed to finish)
+// and never touches a terminal status: a valid order past Expires stays
+// valid, since Expires bounds completing the order, not fetching its
+// certificate.
+func (o *Order) presentExpired() {
+	if (o.Status == OrderStatusPending || o.Status == OrderStatusReady) && o.expired() {
+		o.Status = OrderStatusInvalid
+	}
+}
+
 const (
 	IdentifierTypePermanentIdentifier = "permanent-identifier"
 	IdentifierTypeHardwareModule      = "hardware-module"
@@ -201,7 +245,9 @@ type Authorization struct {
 	// ChallengeIDs names the authorization's challenges; the stored record
 	// carries only the IDs. Challenges is the ACME wire field, composed
 	// from the challenge records on read and never persisted, so the
-	// copies cannot drift from the records they mirror.
+	// copies cannot drift from the records they mirror. The parent carries
+	// the IDs rather than the backend deriving them from Challenge.AuthzID,
+	// so Storage never needs a lookup by field beyond GetAccountByKey.
 	ChallengeIDs []string    `json:"challengeIds,omitempty"`
 	Challenges   []Challenge `json:"challenges"`
 	Wildcard     bool        `json:"wildcard,omitempty"`
@@ -211,7 +257,9 @@ type Authorization struct {
 }
 
 type Challenge struct {
-	Type      string     `json:"type"`
+	Type string `json:"type"`
+	// URL is an ACME wire field composed from the ID on read and never
+	// persisted.
 	URL       string     `json:"url"`
 	Status    string     `json:"status"`
 	Validated *time.Time `json:"validated,omitempty"`
@@ -241,6 +289,19 @@ const (
 	AuthzStatusInvalid = "invalid"
 	AuthzStatusExpired = "expired"
 )
+
+func (a *Authorization) expired() bool {
+	return a.Expires != nil && time.Now().After(*a.Expires)
+}
+
+// presentExpired rewrites an expired pending or valid authorization to
+// expired. Presentation only: the challenge-response and settlement gates
+// keep an expired authorization unusable.
+func (a *Authorization) presentExpired() {
+	if (a.Status == AuthzStatusPending || a.Status == AuthzStatusValid) && a.expired() {
+		a.Status = AuthzStatusExpired
+	}
+}
 
 const (
 	ChallengeStatusPending    = "pending"
