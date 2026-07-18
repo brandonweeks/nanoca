@@ -49,7 +49,7 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 
 	order := &Order{ID: "o1", Status: OrderStatusProcessing, Reservation: reservation()}
 	challenge := &Challenge{ID: "c1", Status: ChallengeStatusValid, Attestation: attestation, Reservation: reservation()}
-	authz := &Authorization{ID: "a1", Challenges: []Challenge{{ID: "c1", Attestation: attestation, Reservation: reservation()}}}
+	authz := &Authorization{ID: "a1", ChallengeIDs: []string{"c1"}, Challenges: []Challenge{{ID: "c1", Attestation: attestation, Reservation: reservation()}}}
 
 	for name, data := range map[string]any{
 		"order":         order,
@@ -58,7 +58,7 @@ func TestWriteJSONResponseScrubsStorageState(t *testing.T) {
 	} {
 		rec := httptest.NewRecorder()
 		ca.writeJSONResponse(t.Context(), rec, http.StatusOK, data, "")
-		for _, field := range []string{"reservation", "attestation"} {
+		for _, field := range []string{"reservation", "attestation", "challengeIds"} {
 			if body := rec.Body.String(); strings.Contains(body, field) {
 				t.Errorf("%s response leaks %s state:\n%s", name, field, body)
 			}

@@ -54,7 +54,8 @@ type HardwareModule struct {
 // certificate response is built by ServedChain, which omits the root.
 type Certificate struct {
 	*x509.Certificate `json:"-"`
-	// ID is the storage and URL identifier; the CA sets it to the order ID.
+	// ID is the storage and URL identifier; the CA assigns a fresh random
+	// ID per finalize attempt.
 	ID           string   `json:"id"`
 	Raw          []byte   `json:"raw"`
 	SerialNumber string   `json:"serialNumber"`
@@ -193,15 +194,20 @@ const (
 )
 
 type Authorization struct {
-	ID         string      `json:"id"`
-	Status     string      `json:"status"`
-	Expires    *time.Time  `json:"expires,omitempty"`
-	Identifier Identifier  `json:"identifier"`
-	Challenges []Challenge `json:"challenges"`
-	Wildcard   bool        `json:"wildcard,omitempty"`
-	AccountID  string      `json:"accountId"`
-	OrderID    string      `json:"orderId"`
-	CreatedAt  time.Time   `json:"createdAt"`
+	ID         string     `json:"id"`
+	Status     string     `json:"status"`
+	Expires    *time.Time `json:"expires,omitempty"`
+	Identifier Identifier `json:"identifier"`
+	// ChallengeIDs names the authorization's challenges; the stored record
+	// carries only the IDs. Challenges is the ACME wire field, composed
+	// from the challenge records on read and never persisted, so the
+	// copies cannot drift from the records they mirror.
+	ChallengeIDs []string    `json:"challengeIds,omitempty"`
+	Challenges   []Challenge `json:"challenges"`
+	Wildcard     bool        `json:"wildcard,omitempty"`
+	AccountID    string      `json:"accountId"`
+	OrderID      string      `json:"orderId"`
+	CreatedAt    time.Time   `json:"createdAt"`
 }
 
 type Challenge struct {

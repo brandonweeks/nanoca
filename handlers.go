@@ -472,6 +472,13 @@ func (ca *CA) handleAuthorization(w http.ResponseWriter, r *http.Request) {
 	// pending orders.
 	ca.updateAuthorizationStatus(ctx, authz)
 
+	// The composed challenge copies carry the stored status; a processing
+	// challenge whose reservation lapsed reads as pending, as
+	// handleChallenge presents it.
+	for i := range authz.Challenges {
+		authz.Challenges[i].presentLapsed(ca.reservationLease)
+	}
+
 	if postData.postAsGet {
 		ca.writeJSONResponseWithNonce(ctx, w, http.StatusOK, authz)
 	} else {
@@ -601,9 +608,9 @@ func (ca *CA) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// scrubStorageState strips storage-internal state — the reservation and the
-// stored attestation object — from a client-facing copy; the ACME wire
-// format has neither field.
+// scrubStorageState strips storage-internal state, the reservation, the
+// stored attestation object, and the challenge ID list, from a
+// client-facing copy; the ACME wire format has none of these fields.
 func scrubStorageState(data any) any {
 	switch v := data.(type) {
 	case *Order:
@@ -617,6 +624,7 @@ func scrubStorageState(data any) any {
 		return &scrubbed
 	case *Authorization:
 		scrubbed := *v
+		scrubbed.ChallengeIDs = nil
 		scrubbed.Challenges = slices.Clone(v.Challenges)
 		for i := range scrubbed.Challenges {
 			scrubbed.Challenges[i].Reservation = nil
@@ -740,6 +748,8 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 	orderID := ca.generateOrderID()
 
 	var authzURLs []string
+	var authzs []*Authorization
+	var challenges []*Challenge
 
 	for _, identifier := range orderReq.Identifiers {
 		authzID := ca.generateAuthorizationID()
@@ -754,13 +764,12 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 			Identifier: identifier,
 			Status:     "pending",
 			Expires:    &expires,
-			Challenges: []Challenge{},
 			CreatedAt:  time.Now(),
 		}
 
 		if identifier.Type == "permanent-identifier" || identifier.Type == "hardware-module" {
 			challengeID := ca.generateChallengeID()
-			challenge := Challenge{
+			challenge := &Challenge{
 				ID:      challengeID,
 				AuthzID: authzID,
 				Type:    "device-attest-01",
@@ -769,15 +778,11 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 				URL:     ca.url(fmt.Sprintf("/challenge/%s", challengeID)),
 			}
 
-			if err := ca.storage.CreateChallenge(ctx, &challenge); err != nil {
-				return nil, fmt.Errorf("failed to create challenge: %w", err)
-			}
-			authz.Challenges = append(authz.Challenges, challenge)
+			challenges = append(challenges, challenge)
+			authz.ChallengeIDs = append(authz.ChallengeIDs, challengeID)
 		}
 
-		if err := ca.storage.CreateAuthorization(ctx, authz); err != nil {
-			return nil, fmt.Errorf("failed to create authorization: %w", err)
-		}
+		authzs = append(authzs, authz)
 	}
 
 	order := &Order{
@@ -790,7 +795,7 @@ func (ca *CA) createOrder(ctx context.Context, accountID string, orderReq OrderR
 		CreatedAt:      time.Now(),
 	}
 
-	if err := ca.storage.CreateOrder(ctx, order); err != nil {
+	if err := ca.storage.CreateOrder(ctx, order, authzs, challenges); err != nil {
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
 	return order, nil
@@ -1007,8 +1012,7 @@ func (ca *CA) updateOrderStatus(ctx context.Context, order *Order) {
 }
 
 // updateAuthorizationStatus settles a pending authorization once its
-// challenges settle, refreshing the embedded challenge copies with the
-// transition. The pending-only guard — enforced again by
+// challenges settle. The pending-only guard — enforced again by
 // SettleAuthorization against the stored record — keeps a recompute from
 // stale reads from overwriting a settlement another request has since
 // written; a recompute that settles nothing writes nothing.
@@ -1018,11 +1022,11 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 	}
 
 	// An authorization with no challenges must not count as valid.
-	allValid := len(authz.Challenges) > 0
+	allValid := len(authz.ChallengeIDs) > 0
 	anyInvalid := false
 
-	for i, challenge := range authz.Challenges {
-		currentChallenge, err := ca.storage.GetChallenge(ctx, challenge.ID)
+	for _, challengeID := range authz.ChallengeIDs {
+		challenge, err := ca.storage.GetChallenge(ctx, challengeID)
 		if err != nil {
 			allValid = false
 			continue
@@ -1032,19 +1036,13 @@ func (ca *CA) updateAuthorizationStatus(ctx context.Context, authz *Authorizatio
 		// here for the same reason handleChallenge presents it that way: an
 		// RFC 8555 Section 7.5.1 client polls the authorization object, and
 		// a challenge shown as processing forever would never be re-POSTed.
-		currentChallenge.presentLapsed(ca.reservationLease)
+		challenge.presentLapsed(ca.reservationLease)
 
-		// Reservations and attestation blobs belong to the challenge
-		// record, not embedded copies.
-		currentChallenge.Reservation = nil
-		currentChallenge.Attestation = nil
-		authz.Challenges[i] = *currentChallenge
-
-		if currentChallenge.Status == "invalid" {
+		if challenge.Status == ChallengeStatusInvalid {
 			anyInvalid = true
 			break
 		}
-		if currentChallenge.Status != "valid" {
+		if challenge.Status != ChallengeStatusValid {
 			allValid = false
 		}
 	}
@@ -1185,13 +1183,14 @@ func (ca *CA) finalizeCertificate(ctx context.Context, orderID, accountID string
 	return order, nil
 }
 
-// issueForOrder issues the certificate for a reserved order and commits it
-// atomically with the order's valid transition. Nothing is persisted until
-// that commit, so a failure releases the reservation and discards the
-// signed certificate — a retry issues a fresh certificate for the CSR it
-// actually carries, so a stored certificate never predates the CSR that
-// finalized the order — and a crash leaves the order processing until the
-// lease lapses and a retry reclaims it.
+// issueForOrder issues the certificate for a reserved order under a fresh
+// per-attempt ID and commits it by transitioning the order to valid. The
+// token-gated order write is the commit point: a failure releases the
+// reservation and leaves the signed certificate stored but referenced by
+// no order, so it is never served. A retry issues a fresh certificate for
+// the CSR it actually carries, so a served certificate never predates the
+// CSR that finalized the order, and a crash leaves the order processing
+// until the lease lapses and a retry reclaims it.
 func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.CertificateRequest, token string) (*Certificate, []*DeviceInfo, error) {
 	deviceInfos, err := ca.deviceInfosForOrder(ctx, order)
 	if err != nil {
@@ -1202,13 +1201,13 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 	if err != nil {
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
 	}
-	cert.ID = order.ID
+	cert.ID = randomID(16)
 
 	order.Status = OrderStatusValid
 	order.Certificate = ca.url(fmt.Sprintf("/certificate/%s", cert.ID))
 	order.Reservation = nil
 	if err := ca.storage.CompleteOrder(ctx, order, cert, token); err != nil {
-		ca.logger.ErrorContext(ctx, "Discarding signed certificate after failed completion", "serial_number", cert.SerialNumber, "error", err)
+		ca.logger.ErrorContext(ctx, "Leaving signed certificate unreferenced after failed completion", "serial_number", cert.SerialNumber, "error", err)
 		// A lost race means the lease lapsed and another finalize
 		// reclaimed the order; its outcome stands and there is no
 		// reservation left to release. That is a client-state condition
@@ -1266,15 +1265,15 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 			continue
 		}
 
-		for _, challenge := range authz.Challenges {
-			if challenge.Status != ChallengeStatusValid {
-				continue
-			}
-			challengeObj, err := ca.storage.GetChallenge(ctx, challenge.ID)
+		for _, challengeID := range authz.ChallengeIDs {
+			challenge, err := ca.storage.GetChallenge(ctx, challengeID)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get challenge: %w", err)
 			}
-			deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challengeObj)
+			if challenge.Status != ChallengeStatusValid {
+				continue
+			}
+			deviceInfo, err := ca.extractDeviceInfoFromChallenge(ctx, challenge)
 			if err != nil {
 				return nil, fmt.Errorf("failed to extract device info: %w", err)
 			}

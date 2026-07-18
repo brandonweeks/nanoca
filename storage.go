@@ -55,7 +55,11 @@ type Storage interface {
 	GetAccountByKey(ctx context.Context, keyThumbprint string) (*Account, error)
 	UpdateAccount(ctx context.Context, account *Account) error
 
-	CreateOrder(ctx context.Context, order *Order) error
+	// CreateOrder stores a new order together with its authorizations and
+	// challenges, preferably atomically; a backend without multi-record
+	// atomicity must write challenges, then authorizations, then the order,
+	// so a readable record never references a missing one.
+	CreateOrder(ctx context.Context, order *Order, authzs []*Authorization, challenges []*Challenge) error
 	GetOrder(ctx context.Context, id string) (*Order, error)
 	// SetOrderStatus transitions an order from one status to the next only
 	// if it is still in the expected preceding status, so a stale caller
@@ -77,17 +81,17 @@ type Storage interface {
 	ReleaseOrderFinalize(ctx context.Context, id, token, to string) error
 	GetOrdersByAccount(ctx context.Context, accountID string) ([]*Order, error)
 
-	CreateAuthorization(ctx context.Context, authz *Authorization) error
+	// GetAuthorization loads an authorization, composing the wire-format
+	// Challenges from the challenge records named by ChallengeIDs; the
+	// stored record carries only the IDs.
 	GetAuthorization(ctx context.Context, id string) (*Authorization, error)
 	// SettleAuthorization transitions a pending authorization to
-	// authz.Status — valid or invalid — writing the full record so the
-	// refreshed embedded challenge copies land with the transition. It
+	// authz.Status, valid or invalid; only the status is written. It
 	// returns ErrStatusMismatch, atomically with the write, when the stored
 	// authorization is no longer pending, so a recompute from stale reads
 	// cannot overwrite a settlement another request has since written.
 	SettleAuthorization(ctx context.Context, authz *Authorization) error
 
-	CreateChallenge(ctx context.Context, challenge *Challenge) error
 	GetChallenge(ctx context.Context, id string) (*Challenge, error)
 	// ReserveChallengeValidation takes the exclusive right to validate a
 	// challenge, with the same contract as ReserveOrderFinalize: pending to
@@ -103,13 +107,15 @@ type Storage interface {
 	// after a transient failure.
 	SettleChallenge(ctx context.Context, challenge *Challenge, reservationToken string) error
 
-	// CompleteOrder atomically stores the certificate under Certificate.ID
-	// — the identifier GetCertificate looks up — and transitions the order
-	// from processing to valid, clearing its reservation; the write
+	// CompleteOrder stores the certificate under Certificate.ID, the
+	// identifier GetCertificate looks up, and transitions the order from
+	// processing to valid, clearing its reservation. The order write
 	// requires the matching token, so a finalize whose reservation was
-	// reclaimed cannot persist a certificate for a stale CSR. On error
-	// neither write is persisted, so a stored certificate always belongs
-	// to a valid order.
+	// reclaimed cannot make its certificate reachable for a stale CSR.
+	// The certificate write is unconditional and lands before the order
+	// write, so a failed completion can leave a certificate stored but
+	// referenced by no order; a certificate is served only through an
+	// order whose Certificate URL names it.
 	CompleteOrder(ctx context.Context, order *Order, cert *Certificate, token string) error
 	GetCertificate(ctx context.Context, id string) (*Certificate, error)
 

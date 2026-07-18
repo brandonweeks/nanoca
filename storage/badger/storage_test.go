@@ -239,7 +239,7 @@ func TestStorage_OrderOperations(t *testing.T) {
 		Identifiers: []nanoca.Identifier{{Type: "permanent-identifier", Value: "device-123"}},
 	}
 
-	err := storage.CreateOrder(ctx, order)
+	err := storage.CreateOrder(ctx, order, nil, nil)
 	if err != nil {
 		t.Errorf("CreateOrder() error = %v", err)
 	}
@@ -296,9 +296,9 @@ func TestStorage_AuthorizationOperations(t *testing.T) {
 		Identifier: nanoca.Identifier{Type: "permanent-identifier", Value: "device-123"},
 	}
 
-	err := storage.CreateAuthorization(ctx, authz)
-	if err != nil {
-		t.Errorf("CreateAuthorization() error = %v", err)
+	order := &nanoca.Order{ID: "order-for-" + authz.ID, Status: nanoca.OrderStatusPending}
+	if err := storage.CreateOrder(ctx, order, []*nanoca.Authorization{authz}, nil); err != nil {
+		t.Errorf("CreateOrder() error = %v", err)
 	}
 
 	retrieved, err := storage.GetAuthorization(ctx, authz.ID)
@@ -342,6 +342,16 @@ func TestStorage_AuthorizationOperations(t *testing.T) {
 	}
 }
 
+// createChallenge persists a challenge through the batch order create,
+// under a throwaway order.
+func createChallenge(t *testing.T, s *Storage, challenge *nanoca.Challenge) {
+	t.Helper()
+	order := &nanoca.Order{ID: "order-for-" + challenge.ID, Status: nanoca.OrderStatusPending}
+	if err := s.CreateOrder(t.Context(), order, nil, []*nanoca.Challenge{challenge}); err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+}
+
 func TestStorage_ChallengeOperations(t *testing.T) {
 	t.Parallel()
 
@@ -358,9 +368,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			Token:  "test-token",
 		}
 
-		if err := storage.CreateChallenge(ctx, challenge); err != nil {
-			t.Fatalf("CreateChallenge() error = %v", err)
-		}
+		createChallenge(t, storage, challenge)
 
 		retrieved, err := storage.GetChallenge(ctx, challenge.ID)
 		if err != nil {
@@ -391,9 +399,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			Status: "pending",
 			Token:  "test-token",
 		}
-		if err := storage.CreateChallenge(ctx, challenge); err != nil {
-			t.Fatalf("CreateChallenge() error = %v", err)
-		}
+		createChallenge(t, storage, challenge)
 
 		if err := storage.ReserveChallengeValidation(ctx, challenge.ID, "t1", time.Minute); err != nil {
 			t.Fatalf("ReserveChallengeValidation() error = %v", err)
@@ -446,9 +452,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			Status: "pending",
 			Token:  "test-token",
 		}
-		if err := storage.CreateChallenge(ctx, challenge); err != nil {
-			t.Fatalf("CreateChallenge() error = %v", err)
-		}
+		createChallenge(t, storage, challenge)
 		if err := storage.ReserveChallengeValidation(ctx, challenge.ID, "t1", time.Minute); err != nil {
 			t.Fatalf("ReserveChallengeValidation() error = %v", err)
 		}
@@ -511,9 +515,7 @@ func TestStorage_ChallengeOperations(t *testing.T) {
 			Status: "pending",
 			Token:  "test-token",
 		}
-		if err := storage.CreateChallenge(ctx, challenge); err != nil {
-			t.Fatalf("CreateChallenge() error = %v", err)
-		}
+		createChallenge(t, storage, challenge)
 		if err := storage.ReserveChallengeValidation(ctx, challenge.ID, "t1", time.Minute); err != nil {
 			t.Fatalf("ReserveChallengeValidation() error = %v", err)
 		}
@@ -562,7 +564,7 @@ func storeCertificate(t *testing.T, s *Storage, cert *nanoca.Certificate) {
 	t.Helper()
 	ctx := t.Context()
 
-	if err := s.CreateOrder(ctx, &nanoca.Order{ID: cert.ID, Status: nanoca.OrderStatusReady}); err != nil {
+	if err := s.CreateOrder(ctx, &nanoca.Order{ID: cert.ID, Status: nanoca.OrderStatusReady}, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 	if err := s.ReserveOrderFinalize(ctx, cert.ID, "token", time.Minute); err != nil {
@@ -604,7 +606,7 @@ func TestStorage_CompleteOrder(t *testing.T) {
 	storage := newTestStorage(t)
 	ctx := t.Context()
 
-	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}); err != nil {
+	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 	// Deliberately not pre-set to valid: CompleteOrder owns the
@@ -622,8 +624,13 @@ func TestStorage_CompleteOrder(t *testing.T) {
 	if err := storage.CompleteOrder(ctx, order, cert, "t1"); !errors.Is(err, nanoca.ErrStatusMismatch) {
 		t.Errorf("CompleteOrder(ready, unreserved) error = %v, want ErrStatusMismatch", err)
 	}
-	if _, err := storage.GetCertificate(ctx, "o1"); !errors.Is(err, nanoca.ErrNotFound) {
-		t.Errorf("GetCertificate() after failed completion error = %v, want ErrNotFound", err)
+	// The certificate write is unconditional; a failed completion leaves it
+	// stored but referenced by no order.
+	if _, err := storage.GetCertificate(ctx, "o1"); err != nil {
+		t.Errorf("GetCertificate() after failed completion error = %v", err)
+	}
+	if got, err := storage.GetOrder(ctx, "o1"); err != nil || got.Status != nanoca.OrderStatusReady {
+		t.Errorf("order after failed completion = %+v, %v, want status %q", got, err, nanoca.OrderStatusReady)
 	}
 
 	if err := storage.ReserveOrderFinalize(ctx, "o1", "t1", time.Minute); err != nil {
@@ -661,7 +668,7 @@ func TestReserveOrderFinalize(t *testing.T) {
 	storage := newTestStorage(t)
 	ctx := t.Context()
 
-	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}); err != nil {
+	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusPending}, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 	if err := storage.ReserveOrderFinalize(ctx, "o1", "t1", time.Minute); !errors.Is(err, nanoca.ErrStatusMismatch) {
@@ -710,7 +717,7 @@ func TestReleaseOrderFinalize(t *testing.T) {
 	storage := newTestStorage(t)
 	ctx := t.Context()
 
-	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusReady}); err != nil {
+	if err := storage.CreateOrder(ctx, &nanoca.Order{ID: "o1", Status: nanoca.OrderStatusReady}, nil, nil); err != nil {
 		t.Fatalf("CreateOrder() error = %v", err)
 	}
 	if err := storage.ReleaseOrderFinalize(ctx, "o1", "t1", nanoca.OrderStatusReady); !errors.Is(err, nanoca.ErrStatusMismatch) {
@@ -746,9 +753,7 @@ func TestSettleChallengeToPending(t *testing.T) {
 	ctx := t.Context()
 
 	pending := &nanoca.Challenge{ID: "c1", Status: nanoca.ChallengeStatusPending}
-	if err := storage.CreateChallenge(ctx, pending); err != nil {
-		t.Fatalf("CreateChallenge() error = %v", err)
-	}
+	createChallenge(t, storage, pending)
 	if err := storage.SettleChallenge(ctx, pending, "t1"); !errors.Is(err, nanoca.ErrStatusMismatch) {
 		t.Errorf("SettleChallenge(pending) error = %v, want ErrStatusMismatch", err)
 	}
