@@ -3,12 +3,12 @@ module github.com/brandonweeks/nanoca
 go 1.26.0
 
 require (
-	github.com/dgraph-io/badger/v4 v4.9.5
+	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/micromdm/nanolib v0.5.1
 	github.com/micromdm/nanomdm v0.9.0
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
 )
 
