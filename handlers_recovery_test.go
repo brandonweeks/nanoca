@@ -115,10 +115,10 @@ func TestZombieInvalidationDoesNotRevertSettledAuthz(t *testing.T) {
 	}
 	chal.Payload = payload
 
-	zombieDone := make(chan error, 1)
+	zombieDone := make(chan struct{})
 	go func() {
-		_, err := client.Accept(t.Context(), chal)
-		zombieDone <- err
+		defer close(zombieDone)
+		_, _ = client.Accept(t.Context(), chal)
 	}()
 	<-verifier.entered[0]
 
