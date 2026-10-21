@@ -19,7 +19,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/klauspost/compress v1.18.4 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/micromdm/plist v0.2.2 // indirect
 	github.com/smallstep/pkcs7 v0.2.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
