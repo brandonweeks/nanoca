@@ -1,3 +1,7 @@
+// Package null implements an attestation format that accepts any statement.
+// It is for tests and local development only. The client chooses the
+// attestation format, so a CA that registers this verifier next to a real
+// one lets any client skip attestation.
 package null
 
 import (

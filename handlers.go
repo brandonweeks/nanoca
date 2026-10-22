@@ -149,7 +149,7 @@ func (ca *CA) handleNewAccount(w http.ResponseWriter, r *http.Request) {
 		ID:                   accountID,
 		Key:                  postData.jwk,
 		KeyThumbprint:        keyThumbprint,
-		Status:               "valid",
+		Status:               AccountStatusValid,
 		Contact:              accountReq.Contact,
 		TermsOfServiceAgreed: accountReq.TermsOfServiceAgreed,
 		CreatedAt:            time.Now(),
@@ -287,6 +287,12 @@ func (ca *CA) lookupJWK(r *http.Request, jws *jose.JSONWebSignature) (*jose.JSON
 		return nil, InternalServerError("Failed to look up account")
 	}
 
+	// RFC 8555 Section 7.3.6: requests signed by a deactivated account are
+	// unauthorized.
+	if account.Status != AccountStatusValid {
+		return nil, Unauthorized("Account is not valid")
+	}
+
 	if account.Key == nil {
 		ca.logger.ErrorContext(ctx, "Account key is nil", "account_id", accountID)
 		return nil, InternalServerError("Failed to process account key")
@@ -345,7 +351,7 @@ func (ca *CA) verifyPOST(r *http.Request, kx keyExtractor) (*authenticatedPOST, 
 		if prob, ok := errors.AsType[*Problem](err); ok {
 			return nil, prob
 		}
-		return nil, Malformed(fmt.Sprintf("Failed to parse JWS: %v", err))
+		return nil, Malformed("Failed to parse JWS").WithCause(err)
 	}
 
 	pubKey, prob := kx(r, jws)
@@ -1185,7 +1191,7 @@ func parseFinalizeCSR(csrB64 string) (*x509.CertificateRequest, error) {
 	}
 
 	if err := csr.CheckSignature(); err != nil {
-		return nil, BadCSR(fmt.Sprintf("CSR signature verification failed: %s", err.Error()))
+		return nil, BadCSR("CSR signature verification failed").WithCause(err)
 	}
 
 	return csr, nil

@@ -99,6 +99,13 @@ func (n staticNonce) Nonce() (string, error) { return string(n), nil }
 // hand.
 func signedPostAsGet(t *testing.T, ts *httptest.Server, key *ecdsa.PrivateKey, kid, url string) (int, []byte) {
 	t.Helper()
+	return signedPostAsGetWithHost(t, ts, key, kid, url, "")
+}
+
+// signedPostAsGetWithHost is signedPostAsGet with the request's Host header
+// overridden when host is not empty.
+func signedPostAsGetWithHost(t *testing.T, ts *httptest.Server, key *ecdsa.PrivateKey, kid, url, host string) (int, []byte) {
+	t.Helper()
 
 	nonce := fetchNonce(t, ts.Client(), ts.URL)
 	signer, err := jose.NewSigner(
@@ -121,6 +128,9 @@ func signedPostAsGet(t *testing.T, ts *httptest.Server, key *ecdsa.PrivateKey, k
 		t.Fatalf("failed to build request: %v", err)
 	}
 	req.Header.Set("Content-Type", joseContentType)
+	if host != "" {
+		req.Host = host
+	}
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
