@@ -64,43 +64,43 @@ func TestVerify(t *testing.T) {
 	tests := []struct {
 		name      string
 		stmt      nanoca.AttestationStatement
-		challenge []byte
+		challenge string
 		wantErr   string
 	}{
 		{
 			name:      "FormatMismatch",
 			stmt:      nanoca.AttestationStatement{Format: "tpm", AttStmt: map[string]any{}},
-			challenge: []byte("challenge"),
+			challenge: "challenge",
 			wantErr:   "format mismatch: expected apple, got tpm",
 		},
 		{
 			name:      "MissingX5C",
 			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{}},
-			challenge: []byte("challenge"),
+			challenge: "challenge",
 			wantErr:   "apple attestation statement missing x5c field",
 		},
 		{
 			name:      "InvalidX5CType",
 			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": "not an array"}},
-			challenge: []byte("challenge"),
+			challenge: "challenge",
 			wantErr:   "x5c field must be an array",
 		},
 		{
 			name:      "EmptyX5C",
 			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{}}},
-			challenge: []byte("challenge"),
+			challenge: "challenge",
 			wantErr:   "x5c array cannot be empty",
 		},
 		{
 			name:      "InvalidCertificateBytes",
 			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{"not bytes"}}},
-			challenge: []byte("challenge"),
+			challenge: "challenge",
 			wantErr:   "x5c[0] must be a byte slice",
 		},
 		{
 			name:      "NonceValidation",
 			stmt:      nanoca.AttestationStatement{Format: "apple", AttStmt: map[string]any{"x5c": []any{cert.Raw}}},
-			challenge: []byte("wrong challenge"),
+			challenge: "wrong challenge",
 			wantErr:   "nonce verification failed: nonce value mismatch",
 		},
 	}
@@ -110,7 +110,7 @@ func TestVerify(t *testing.T) {
 			t.Parallel()
 
 			verifier := New(slog.New(slog.DiscardHandler))
-			_, err := verifier.Verify(t.Context(), tt.stmt, tt.challenge)
+			_, err := verifier.Verify(t.Context(), tt.stmt, nanoca.ChallengeBinding{Token: tt.challenge})
 			if err == nil {
 				t.Fatalf("expected error %q, got nil", tt.wantErr)
 			}

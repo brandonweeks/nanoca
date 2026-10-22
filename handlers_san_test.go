@@ -24,7 +24,7 @@ type appleShapedVerifier struct{}
 
 func (appleShapedVerifier) Format() string { return "appleshaped" }
 
-func (appleShapedVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (appleShapedVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 		HardwareModule:      &nanoca.HardwareModule{Type: testUDIDOID, Value: []byte(testDeviceUDID)},
@@ -38,7 +38,7 @@ type keyOnlyVerifier struct{}
 
 func (keyOnlyVerifier) Format() string { return "keyonly" }
 
-func (keyOnlyVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (keyOnlyVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	return &nanoca.DeviceInfo{PublicKey: testDeviceKey.Public()}, nil
 }
 

@@ -42,7 +42,7 @@ func newGateVerifier() *gateVerifier {
 
 func (v *gateVerifier) Format() string { return "gate" }
 
-func (v *gateVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (v *gateVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	v.mu.Lock()
 	call := v.calls
 	v.calls++
@@ -260,7 +260,7 @@ type flakyReverifyVerifier struct {
 
 func (v *flakyReverifyVerifier) Format() string { return "flaky" }
 
-func (v *flakyReverifyVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (v *flakyReverifyVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.calls++

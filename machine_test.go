@@ -307,7 +307,7 @@ func TestMachineChallengeLifecycle(t *testing.T) {
 
 	now := time.Now()
 	settled := *challenge
-	settled.settleValid(now, []byte("attestation-object"))
+	settled.settleValid(now, []byte("attestation-object"), "token.thumbprint")
 
 	if err := m.SettleChallenge(ctx, &settled, "stale"); !errors.Is(err, ErrReserved) {
 		t.Errorf("SettleChallenge(stale token) error = %v, want ErrReserved", err)

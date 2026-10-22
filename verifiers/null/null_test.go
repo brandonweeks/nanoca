@@ -70,7 +70,7 @@ func TestAttestationVerifier(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			deviceInfo, err := verifier.Verify(t.Context(), tc.stmt, []byte("challenge"))
+			deviceInfo, err := verifier.Verify(t.Context(), tc.stmt, nanoca.ChallengeBinding{Token: "challenge"})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("Verify() error = nil, want error")

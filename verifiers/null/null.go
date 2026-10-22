@@ -29,7 +29,7 @@ func New() *AttestationVerifier {
 func (n *AttestationVerifier) Format() string { return "null" }
 
 // Verify validates a null attestation statement
-func (n *AttestationVerifier) Verify(_ context.Context, stmt nanoca.AttestationStatement, _ []byte) (*nanoca.DeviceInfo, error) {
+func (n *AttestationVerifier) Verify(_ context.Context, stmt nanoca.AttestationStatement, _ nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	if stmt.Format != "null" {
 		return nil, fmt.Errorf("format mismatch: expected null, got %s", stmt.Format)
 	}
