@@ -41,7 +41,7 @@ func TestFinalizeNilDeviceInfoTerminal(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{nilDeviceInfoVerifier{}}})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "nil-identity-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, attObjFor(t, "nildev")); err != nil {
 		return
 	}
@@ -65,7 +65,7 @@ func TestChallengeNilDeviceInfoRejected(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{nilDeviceInfoVerifier{}}})
 	client := newACMEClient(t, ts)
 
-	_, chal := pendingChallenge(t, client, "nil-identity-rejected-device")
+	_, chal := pendingChallenge(t, client)
 
 	err := submitAttObj(t, client, chal, attObjFor(t, "nildev"))
 	if err == nil {
@@ -84,7 +84,7 @@ func (nilKeyVerifier) Format() string { return "nilkey" }
 
 func (nilKeyVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
 	return &nanoca.DeviceInfo{
-		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "nil-key-device"},
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 	}, nil
 }
 
@@ -97,7 +97,7 @@ func TestChallengeNilKeyRejected(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{nilKeyVerifier{}}})
 	client := newACMEClient(t, ts)
 
-	_, chal := pendingChallenge(t, client, "nil-key-device")
+	_, chal := pendingChallenge(t, client)
 
 	err := submitAttObj(t, client, chal, attObjFor(t, "nilkey"))
 	if err == nil {
@@ -109,6 +109,85 @@ func TestChallengeNilKeyRejected(t *testing.T) {
 	}
 }
 
+// An attestation for a different device than the order names must fail
+// the challenge (draft-ietf-acme-device-attest-10 Section 5, step 3).
+func TestChallengeIdentifierMismatch(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{})
+	client := newACMEClient(t, ts)
+
+	order, chal := pendingChallenge(t, client)
+
+	att, err := cbor.Marshal(createNullDeviceAttestation(t, "other-device"))
+	if err != nil {
+		t.Fatalf("failed to marshal attestation: %v", err)
+	}
+	err = submitAttObj(t, client, chal, base64.RawURLEncoding.EncodeToString(att))
+	var ae *acme.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusForbidden {
+		t.Fatalf("Accept() with mismatched identity error = %v, want 403 unauthorized", err)
+	}
+
+	authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
+	if err != nil {
+		t.Fatalf("failed to get authorization: %v", err)
+	}
+	if authz.Status != acme.StatusInvalid {
+		t.Errorf("authorization status = %q, want invalid", authz.Status)
+	}
+}
+
+type identitySwitchingVerifier struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (v *identitySwitchingVerifier) Format() string { return "switching" }
+
+func (v *identitySwitchingVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.calls++
+	serial := testDeviceSerial
+	if v.calls > 1 {
+		serial = "other-device"
+	}
+	return &nanoca.DeviceInfo{
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: serial},
+		PublicKey:           testDeviceKey.Public(),
+	}, nil
+}
+
+// Finalize re-verifies the stored attestation and compares the identity
+// again. A result that no longer matches the order is a terminal failure:
+// re-verification would return the same identity on every retry.
+func TestFinalizeIdentifierMismatchTerminal(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{&identitySwitchingVerifier{}}})
+	client := newACMEClient(t, ts)
+
+	order, chal := pendingChallenge(t, client)
+	if err := submitAttObj(t, client, chal, attObjFor(t, "switching")); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
+	var ae *acme.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusForbidden {
+		t.Fatalf("CreateOrderCert() error = %v, want 403 unauthorized", err)
+	}
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusInvalid {
+		t.Errorf("order status after identity mismatch = %q, want invalid", got.Status)
+	}
+}
+
 // A CSR for a key other than the attested key gets badCSR. The order stays
 // ready, so the client can finalize again with the attested key.
 func TestFinalizeRejectsUnattestedKey(t *testing.T) {
@@ -117,7 +196,7 @@ func TestFinalizeRejectsUnattestedKey(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "unattested-key-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -153,7 +232,7 @@ func (v *captureVerifier) Verify(_ context.Context, stmt nanoca.AttestationState
 	defer v.mu.Unlock()
 	v.stmts = append(v.stmts, stmt)
 	return &nanoca.DeviceInfo{
-		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "captured-device"},
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
@@ -170,7 +249,7 @@ func TestFinalizeReverifiesOriginalStatement(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{verifier}})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "capture-device")
+	order, chal := pendingChallenge(t, client)
 	attObj, err := cbor.Marshal(map[string]any{
 		"fmt":     "capture",
 		"attStmt": map[string]any{"x5c": []any{[]byte("leaf certificate der")}},
@@ -218,7 +297,7 @@ func TestChallengeVerifierFailure(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{erroringVerifier{}}})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "failing-device")
+	order, chal := pendingChallenge(t, client)
 
 	attObj, err := cbor.Marshal(map[string]any{"fmt": "failing", "attStmt": map[string]any{}})
 	if err != nil {

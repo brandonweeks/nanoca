@@ -32,9 +32,9 @@ func (m *mockIssuanceObserver) OnIssuance(_ context.Context, _ *nanoca.IssuanceE
 	return nil
 }
 
-func createNullDeviceAttestation(t *testing.T) map[string]any {
+func createNullDeviceAttestation(t *testing.T, serial string) map[string]any {
 	t.Helper()
-	att, err := null.CreateNullDeviceAttestation(testDeviceKey.Public())
+	att, err := null.CreateNullDeviceAttestation(serial, testDeviceKey.Public())
 	if err != nil {
 		t.Fatalf("failed to create attestation: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDeviceAttestationFlow(t *testing.T) {
 		t.Fatalf("Failed to retrieve order: %v", err)
 	}
 
-	nullAttestation := createNullDeviceAttestation(t)
+	nullAttestation := createNullDeviceAttestation(t, "device-android-12345")
 
 	attObjBytes, err := cbor.Marshal(nullAttestation)
 	if err != nil {

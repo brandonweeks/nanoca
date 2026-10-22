@@ -54,9 +54,11 @@ func newUnregisteredClient(t *testing.T, ts *httptest.Server) *acme.Client {
 	}
 }
 
-func pendingChallenge(t *testing.T, client *acme.Client, value string) (*acme.Order, *acme.Challenge) {
+const testDeviceSerial = "test-device"
+
+func pendingChallenge(t *testing.T, client *acme.Client) (*acme.Order, *acme.Challenge) {
 	t.Helper()
-	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{{Type: "permanent-identifier", Value: value}})
+	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{{Type: "permanent-identifier", Value: testDeviceSerial}})
 	if err != nil {
 		t.Fatalf("failed to create order: %v", err)
 	}
@@ -80,7 +82,7 @@ func submitAttObj(t *testing.T, client *acme.Client, chal *acme.Challenge, attOb
 
 func nullAttObj(t *testing.T) string {
 	t.Helper()
-	b, err := cbor.Marshal(createNullDeviceAttestation(t))
+	b, err := cbor.Marshal(createNullDeviceAttestation(t, testDeviceSerial))
 	if err != nil {
 		t.Fatalf("failed to marshal attestation: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestAccountOrdersURLResolvable(t *testing.T) {
 		t.Errorf("orders before any order = %v, want empty", orders)
 	}
 
-	order, chal := pendingChallenge(t, client, "orders-list-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -240,13 +242,47 @@ func TestIssuanceExtractsDeviceInfo(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "deviceinfo-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 
 	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err != nil {
 		t.Fatalf("CreateOrderCert() error = %v", err)
+	}
+}
+
+// draft-ietf-acme-device-attest-10 Sections 3.1 and 4.1: identifier values
+// that do not match the grammar are rejected as malformed.
+func TestNewOrderRejectsMalformedIdentifier(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
+	client := newACMEClient(t, ts)
+
+	tests := []acme.AuthzID{
+		{Type: "permanent-identifier", Value: ""},
+		{Type: "permanent-identifier", Value: "ABC/"},
+		{Type: "permanent-identifier", Value: "ABC/1.40"},
+		{Type: "permanent-identifier", Value: "ABC/1.02"},
+		{Type: "hardware-module", Value: "ABC"},
+		{Type: "hardware-module", Value: "/1.2.3.4"},
+	}
+	for _, id := range tests {
+		t.Run(id.Type+" "+id.Value, func(t *testing.T) {
+			_, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{id})
+			var ae *acme.Error
+			if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:malformed" {
+				t.Errorf("AuthorizeOrder(%s %q) error = %v, want malformed", id.Type, id.Value, err)
+			}
+		})
+	}
+
+	if _, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{
+		{Type: "permanent-identifier", Value: "ABC/1.2.3.4"},
+		{Type: "hardware-module", Value: "ABC/1.2.3.4"},
+	}); err != nil {
+		t.Errorf("AuthorizeOrder() with valid values error = %v", err)
 	}
 }
 
@@ -277,7 +313,7 @@ func TestMalformedAttestations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, chal := pendingChallenge(t, client, "dev-"+tt.name)
+			_, chal := pendingChallenge(t, client)
 			if err := submitAttObj(t, client, chal, tt.attObj); err == nil {
 				t.Error("Accept() error = nil, want error")
 			}
@@ -294,7 +330,7 @@ func TestChallengeDuplicateSubmission(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 	client := newACMEClient(t, ts)
 
-	_, chal := pendingChallenge(t, client, "duplicate-device")
+	_, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -312,7 +348,7 @@ func TestDeviceNotAuthorized(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, denyAuthorizer{})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "denied-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
 		t.Error("Accept() error = nil, want denial")
 	}

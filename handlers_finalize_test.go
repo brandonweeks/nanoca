@@ -71,7 +71,7 @@ func csrFor(t *testing.T, key crypto.Signer) []byte {
 func driveToReady(t *testing.T, ts *httptest.Server) (*acme.Client, *acme.Order) {
 	t.Helper()
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "ready-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestFinalizeNotReadyBadCSR(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 
 	client := newACMEClient(t, ts)
-	order, _ := pendingChallenge(t, client, "pending-bad-csr-device")
+	order, _ := pendingChallenge(t, client)
 	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a csr"), true)
 
 	var ae *acme.Error
@@ -236,7 +236,7 @@ func TestFinalizeForeignOrder(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 
 	owner := newACMEClient(t, ts)
-	order, _ := pendingChallenge(t, owner, "owned-finalize-device")
+	order, _ := pendingChallenge(t, owner)
 
 	other := newACMEClient(t, ts)
 	_, _, err := other.CreateOrderCert(t.Context(), order.FinalizeURL, []byte("not a csr"), true)
@@ -281,7 +281,7 @@ func TestFinalizeNotReady(t *testing.T) {
 	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
 
 	client := newACMEClient(t, ts)
-	order, _ := pendingChallenge(t, client, "pending-device")
+	order, _ := pendingChallenge(t, client)
 	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
 
 	var ae *acme.Error

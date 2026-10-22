@@ -55,7 +55,7 @@ func (v *gateVerifier) Verify(context.Context, nanoca.AttestationStatement, []by
 		return nil, errors.New("verifier unavailable")
 	}
 	return &nanoca.DeviceInfo{
-		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "gate-device"},
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
@@ -108,7 +108,7 @@ func TestZombieInvalidationDoesNotRevertSettledAuthz(t *testing.T) {
 	})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "zombie-authz-device")
+	order, chal := pendingChallenge(t, client)
 
 	payload, err := json.Marshal(map[string]any{"attObj": attObjFor(t, "gate")})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestStrandedChallengeRecoversByPolling(t *testing.T) {
 	ts := newShortLeaseTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	_, chal := pendingChallenge(t, client, "poll-only-device")
+	_, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
 		t.Fatal("Accept() error = nil, want failure from interrupted validation")
 	}
@@ -227,7 +227,7 @@ func TestChallengeSurvivesTransientAuthorizerError(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{authorizer: &failOnceAuthorizer{}})
 	client := newACMEClient(t, ts)
 
-	_, chal := pendingChallenge(t, client, "authz-outage-device")
+	_, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
 		t.Fatal("Accept() error = nil, want failure from authorizer outage")
 	}
@@ -268,7 +268,7 @@ func (v *flakyReverifyVerifier) Verify(context.Context, nanoca.AttestationStatem
 		return nil, errors.New("verifier unavailable")
 	}
 	return &nanoca.DeviceInfo{
-		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "flaky-device"},
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
@@ -283,7 +283,7 @@ func TestFinalizeRetryAfterTransientVerifierError(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{&flakyReverifyVerifier{}}})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "flaky-verify-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, attObjFor(t, "flaky")); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestOrderReadyRetriesAfterStatusWriteFailure(t *testing.T) {
 	ts := newStorageTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "promotion-device")
+	order, chal := pendingChallenge(t, client)
 
 	storage.setFail(true)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
@@ -381,7 +381,7 @@ func TestAuthzPromotionRetriesAfterWriteFailure(t *testing.T) {
 	ts := newStorageTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "authz-promotion-device")
+	order, chal := pendingChallenge(t, client)
 
 	storage.setFail(true)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
@@ -421,7 +421,7 @@ func TestStrandedChallengeRecoversByAuthzPolling(t *testing.T) {
 	ts := newShortLeaseTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "authz-poll-only-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
 		t.Fatal("Accept() error = nil, want failure from interrupted validation")
 	}
