@@ -39,19 +39,18 @@ func New(ctx context.Context, config *abm.Config) (*ABMAuthorizer, error) {
 }
 
 // Authorize determines if a device is authorized for certificate issuance
-// by checking if the device serial number exists in the ABM organization
+// by checking if the device serial number exists in the ABM organization.
+// A device with no serial number, such as one whose attestation proves only
+// the key, cannot be in the organization and is not authorized.
 func (a *ABMAuthorizer) Authorize(ctx context.Context, device *nanoca.DeviceInfo) (bool, error) {
 	if device == nil {
 		return false, errors.New("device info cannot be nil")
 	}
 
-	var serialNumber string
-	if device.PermanentIdentifier != nil {
-		serialNumber = device.PermanentIdentifier.Identifier
+	if device.PermanentIdentifier == nil || device.PermanentIdentifier.Identifier == "" {
+		return false, nil
 	}
-	if serialNumber == "" {
-		return false, errors.New("device has no permanent identifier (serial number)")
-	}
+	serialNumber := device.PermanentIdentifier.Identifier
 
 	serials, err := a.organizationSerials(ctx)
 	if err != nil {

@@ -15,6 +15,10 @@ type AttestationVerifier interface {
 }
 
 type Authorizer interface {
+	// Authorize decides whether the attested device may get a certificate.
+	// The device may carry no identity when the attestation proves only
+	// the key, as Apple User Enrollment attestations do. Admitting such a
+	// device is the authorizer's decision; its certificate names no device.
 	Authorize(ctx context.Context, device *DeviceInfo) (bool, error)
 }
 

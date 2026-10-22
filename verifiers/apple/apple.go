@@ -161,6 +161,9 @@ func newDeviceInfo(serialNumber, udid string, publicKey crypto.PublicKey) *nanoc
 	}
 
 	if udid != "" {
+		// RFC 4108 means hwType to name the module type. Apple publishes no
+		// such OID, so the UDID attribute OID is used: it says what kind of
+		// serial hwSerialNum holds, and matches certificates already issued.
 		deviceInfo.HardwareModule = &nanoca.HardwareModule{
 			Type:  appleDeviceUDIDOID,
 			Value: []byte(udid),

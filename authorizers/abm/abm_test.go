@@ -32,12 +32,14 @@ func TestAuthorizeRejectsBeforeNetwork(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name   string
-		device *nanoca.DeviceInfo
+		name    string
+		device  *nanoca.DeviceInfo
+		wantErr bool
 	}{
 		{
-			name:   "nil device",
-			device: nil,
+			name:    "nil device",
+			device:  nil,
+			wantErr: true,
 		},
 		{
 			name:   "nil permanent identifier",
@@ -56,8 +58,8 @@ func TestAuthorizeRejectsBeforeNetwork(t *testing.T) {
 			t.Parallel()
 
 			authorized, err := (&abmauthorizer.ABMAuthorizer{}).Authorize(t.Context(), tt.device)
-			if err == nil {
-				t.Fatal("Authorize() error = nil, want error")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Authorize() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if authorized {
 				t.Error("Authorize() = true, want false")

@@ -243,6 +243,10 @@ func (o *Order) presentExpired() {
 	}
 }
 
+// An order identifier's value is chosen by the client and is not checked
+// against the attestation: Apple's ACME client sends the payload's
+// ClientIdentifier, an opaque string. The certificate names the identities
+// the attestation proved, whatever type the order used.
 const (
 	IdentifierTypePermanentIdentifier = "permanent-identifier"
 	IdentifierTypeHardwareModule      = "hardware-module"

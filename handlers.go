@@ -406,10 +406,6 @@ func (ca *CA) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 			ca.writeProblem(ctx, w, UnsupportedIdentifier(fmt.Sprintf("Unsupported identifier type %q", identifier.Type)))
 			return
 		}
-		if err := validateIdentifier(identifier); err != nil {
-			ca.writeProblem(ctx, w, Malformed(fmt.Sprintf("Invalid %s value: %v", identifier.Type, err)))
-			return
-		}
 	}
 
 	order, err := ca.createOrder(ctx, postData.accountID, orderReq)
@@ -969,14 +965,6 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	// The attested identity must match the identifier in the order
-	// (draft-ietf-acme-device-attest-10 Section 5, step 3).
-	if !deviceInfo.matches(authz.Identifier) {
-		ca.logger.WarnContext(ctx, "Attested identity does not match order identifier", "challenge_id", challenge.ID, "identifier", authz.Identifier.Value, "attested", deviceInfo.identifierValue(authz.Identifier.Type))
-		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation does not match the order identifier"))
-		return
-	}
-
 	authorized, err := ca.authorizer.Authorize(ctx, deviceInfo)
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
@@ -1379,6 +1367,9 @@ func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) e
 // it proved would silently strip the SANs from the certificate. An empty
 // result means no authorization reads valid — inconsistent state that may
 // heal — so it is refused as retriable rather than issued identity-less.
+//
+// Each result carries every identity the attestation proved. A device the
+// order attests more than once is returned once.
 func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceInfo, error) {
 	var deviceInfos []*DeviceInfo
 	for _, authzID := range order.AuthorizationIDs {
@@ -1413,10 +1404,9 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 			if deviceInfo == nil {
 				break
 			}
-			if !deviceInfo.matches(authz.Identifier) {
-				return nil, Unauthorized("Attestation does not match the order identifier")
+			if !slices.ContainsFunc(deviceInfos, deviceInfo.sameDevice) {
+				deviceInfos = append(deviceInfos, deviceInfo)
 			}
-			deviceInfos = append(deviceInfos, deviceInfo)
 			break
 		}
 	}
@@ -1424,6 +1414,20 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 		return nil, errors.New("no valid authorization yields an attested identity")
 	}
 	return deviceInfos, nil
+}
+
+// sameDevice reports whether d and o carry the same identities and key.
+func (d *DeviceInfo) sameDevice(o *DeviceInfo) bool {
+	key, ok := d.PublicKey.(interface{ Equal(crypto.PublicKey) bool })
+	if !ok || !key.Equal(o.PublicKey) {
+		return false
+	}
+	pi, opi := d.PermanentIdentifier, o.PermanentIdentifier
+	if (pi == nil) != (opi == nil) || pi != nil && (pi.Identifier != opi.Identifier || !pi.Assigner.Equal(opi.Assigner)) {
+		return false
+	}
+	hm, ohm := d.HardwareModule, o.HardwareModule
+	return (hm == nil) == (ohm == nil) && (hm == nil || hm.Type.Equal(ohm.Type) && bytes.Equal(hm.Value, ohm.Value))
 }
 
 // extractDeviceInfoFromChallenge re-verifies the attestation stored with a
