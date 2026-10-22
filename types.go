@@ -280,10 +280,15 @@ type Challenge struct {
 	Validated *time.Time `json:"validated,omitempty"`
 	Error     *Problem   `json:"error,omitempty"`
 	Token     string     `json:"token"`
-	KeyAuth   string     `json:"keyAuthorization,omitempty"`
-	ID        string     `json:"id"`
-	AuthzID   string     `json:"authzId"`
-	CreatedAt time.Time  `json:"createdAt"`
+	// KeyAuth is the key authorization the challenge was validated with,
+	// stored when the challenge settles valid
+	// (draft-ietf-acme-device-attest-10 Section 5). Finalize re-verifies
+	// the stored attestation against it, so an account key change after
+	// validation does not invalidate an order the device already proved.
+	KeyAuth   string    `json:"keyAuthorization,omitempty"`
+	ID        string    `json:"id"`
+	AuthzID   string    `json:"authzId"`
+	CreatedAt time.Time `json:"createdAt"`
 	// Attestation holds the raw CBOR attestation object from the validated
 	// challenge response, verbatim: finalize re-verifies it, and a decoded
 	// copy would not survive storage serialization intact (CBOR byte
@@ -338,10 +343,11 @@ func (c *Challenge) presentLapsed(lease time.Duration) {
 // it wholesale: each transition sets every settlement field so a call
 // site cannot persist a leftover from a prior state.
 
-func (c *Challenge) settleValid(validated time.Time, attestation []byte) {
+func (c *Challenge) settleValid(validated time.Time, attestation []byte, keyAuth string) {
 	c.Status = ChallengeStatusValid
 	c.Validated = &validated
 	c.Attestation = attestation
+	c.KeyAuth = keyAuth
 	c.Error = nil
 }
 
@@ -349,6 +355,7 @@ func (c *Challenge) settleInvalid(validated time.Time, problem *Problem) {
 	c.Status = ChallengeStatusInvalid
 	c.Validated = &validated
 	c.Attestation = nil
+	c.KeyAuth = ""
 	c.Error = problem
 }
 
@@ -356,6 +363,7 @@ func (c *Challenge) settlePending() {
 	c.Status = ChallengeStatusPending
 	c.Validated = nil
 	c.Attestation = nil
+	c.KeyAuth = ""
 	c.Error = nil
 }
 

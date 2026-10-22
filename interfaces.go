@@ -11,7 +11,20 @@ type AttestationVerifier interface {
 	// authorizes the device and builds the certificate SANs from this
 	// identity, and certifies only its PublicKey. A nil DeviceInfo or a nil
 	// PublicKey with a nil error is a failed attestation.
-	Verify(ctx context.Context, stmt AttestationStatement, challenge []byte) (*DeviceInfo, error)
+	Verify(ctx context.Context, stmt AttestationStatement, binding ChallengeBinding) (*DeviceInfo, error)
+}
+
+// ChallengeBinding carries the values an attestation statement can be bound
+// to, so each format checks the one its clients sign over.
+// draft-ietf-acme-device-attest-10 Section 5 binds attToBeSigned to the key
+// authorization, which covers the account key as well; Apple's Managed Device
+// Attestation signs over the token alone.
+type ChallengeBinding struct {
+	// Token is the challenge token, RFC 8555 Section 8.3.
+	Token string
+	// KeyAuthorization is built from the token and the account key
+	// thumbprint, RFC 8555 Section 8.1.
+	KeyAuthorization string
 }
 
 type Authorizer interface {

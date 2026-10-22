@@ -1,6 +1,7 @@
 package nanoca_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -21,7 +22,7 @@ type erroringVerifier struct{}
 
 func (erroringVerifier) Format() string { return "failing" }
 
-func (erroringVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (erroringVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	return nil, errors.New("attestation invalid")
 }
 
@@ -29,7 +30,7 @@ type nilDeviceInfoVerifier struct{}
 
 func (nilDeviceInfoVerifier) Format() string { return "nildev" }
 
-func (nilDeviceInfoVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (nilDeviceInfoVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	return nil, nil
 }
 
@@ -86,7 +87,7 @@ type nilKeyVerifier struct{}
 
 func (nilKeyVerifier) Format() string { return "nilkey" }
 
-func (nilKeyVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+func (nilKeyVerifier) Verify(context.Context, nanoca.AttestationStatement, nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 	}, nil
@@ -197,16 +198,18 @@ func TestFinalizeRejectsUnattestedKey(t *testing.T) {
 }
 
 type captureVerifier struct {
-	mu    sync.Mutex
-	stmts []nanoca.AttestationStatement
+	mu       sync.Mutex
+	stmts    []nanoca.AttestationStatement
+	bindings []nanoca.ChallengeBinding
 }
 
 func (v *captureVerifier) Format() string { return "capture" }
 
-func (v *captureVerifier) Verify(_ context.Context, stmt nanoca.AttestationStatement, _ []byte) (*nanoca.DeviceInfo, error) {
+func (v *captureVerifier) Verify(_ context.Context, stmt nanoca.AttestationStatement, binding nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.stmts = append(v.stmts, stmt)
+	v.bindings = append(v.bindings, binding)
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: testDeviceSerial},
 		PublicKey:           testDeviceKey.Public(),
@@ -264,6 +267,88 @@ func TestFinalizeReverifiesOriginalStatement(t *testing.T) {
 	}
 	if _, ok := x5c[0].([]byte); !ok {
 		t.Errorf("finalize-time x5c[0] type = %T, want []byte", x5c[0])
+	}
+}
+
+// The formats that bind the account key need the key authorization of
+// RFC 8555 Section 8.1, and finalize re-verifies against the one the
+// challenge was validated with.
+func TestVerifierReceivesKeyAuthorization(t *testing.T) {
+	t.Parallel()
+
+	verifier := &captureVerifier{}
+	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{verifier}})
+	client := newACMEClient(t, ts)
+
+	order, chal := pendingChallenge(t, client)
+	attObj, err := cbor.Marshal(map[string]any{
+		"fmt":     "capture",
+		"attStmt": map[string]any{"serial": testDeviceSerial},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal attestation: %v", err)
+	}
+	if err := submitAttObj(t, client, chal, base64.RawURLEncoding.EncodeToString(attObj)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err != nil {
+		t.Fatalf("CreateOrderCert() error = %v", err)
+	}
+
+	thumbprint, err := acme.JWKThumbprint(client.Key.Public())
+	if err != nil {
+		t.Fatalf("JWKThumbprint() error = %v", err)
+	}
+	want := nanoca.ChallengeBinding{
+		Token:            chal.Token,
+		KeyAuthorization: chal.Token + "." + thumbprint,
+	}
+
+	verifier.mu.Lock()
+	bindings := verifier.bindings
+	verifier.mu.Unlock()
+	if len(bindings) != 2 {
+		t.Fatalf("Verify calls = %d, want 2 (challenge, finalize)", len(bindings))
+	}
+	if bindings[0] != want {
+		t.Errorf("challenge-time binding = %+v, want %+v", bindings[0], want)
+	}
+	if bindings[1] != want {
+		t.Errorf("finalize-time binding = %+v, want %+v", bindings[1], want)
+	}
+}
+
+// The key authorization is stored for the finalize re-verification, so it
+// must be scrubbed from the challenge and authorization responses like every
+// other stored field.
+func TestChallengeResponseOmitsKeyAuthorization(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{})
+	client := newACMEClient(t, ts)
+
+	order, chal := pendingChallenge(t, client)
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+
+	account, err := client.GetReg(t.Context(), "")
+	if err != nil {
+		t.Fatalf("GetReg() error = %v", err)
+	}
+	key, ok := client.Key.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("account key is a %T, want an ECDSA key", client.Key)
+	}
+
+	for _, url := range []string{chal.URI, order.AuthzURLs[0]} {
+		status, body := signedPostAsGet(t, ts, key, account.URI, url)
+		if status != http.StatusOK {
+			t.Fatalf("fetch of %s status = %d, body: %s", url, status, body)
+		}
+		if bytes.Contains(body, []byte("keyAuthorization")) {
+			t.Errorf("response from %s carries the key authorization: %s", url, body)
+		}
 	}
 }
 

@@ -28,7 +28,7 @@ func TestVerifyRejectsBadStatements(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := verifier.Verify(t.Context(), tt.stmt, []byte("challenge")); err == nil {
+			if _, err := verifier.Verify(t.Context(), tt.stmt, nanoca.ChallengeBinding{Token: "challenge"}); err == nil {
 				t.Error("Verify() error = nil, want error")
 			}
 		})

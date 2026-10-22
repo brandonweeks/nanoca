@@ -67,7 +67,9 @@ func New(logger *slog.Logger, opts ...Option) *AttestationVerifier {
 func (a *AttestationVerifier) Format() string { return "apple" }
 
 // Verify validates an Apple MDA attestation statement
-func (a *AttestationVerifier) Verify(ctx context.Context, stmt nanoca.AttestationStatement, challenge []byte) (*nanoca.DeviceInfo, error) {
+// Managed Device Attestation signs over the challenge token, not the key
+// authorization, so the nonce extension holds the SHA-256 of the token.
+func (a *AttestationVerifier) Verify(ctx context.Context, stmt nanoca.AttestationStatement, binding nanoca.ChallengeBinding) (*nanoca.DeviceInfo, error) {
 	if stmt.Format != "apple" {
 		return nil, fmt.Errorf("format mismatch: expected apple, got %s", stmt.Format)
 	}
@@ -107,7 +109,7 @@ func (a *AttestationVerifier) Verify(ctx context.Context, stmt nanoca.Attestatio
 		Bytes: credCert.Raw,
 	})))
 
-	expectedNonce := sha256.Sum256(challenge)
+	expectedNonce := sha256.Sum256([]byte(binding.Token))
 
 	if err := a.verifyNonceExtension(credCert, expectedNonce[:]); err != nil {
 		return nil, fmt.Errorf("nonce verification failed: %w", err)

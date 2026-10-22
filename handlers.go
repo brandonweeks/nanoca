@@ -694,6 +694,7 @@ func (ca *CA) present(data any) any {
 		presented := *v
 		presented.Reservation = nil
 		presented.Attestation = nil
+		presented.KeyAuth = ""
 		presented.URL = ca.url(fmt.Sprintf("/challenge/%s", v.ID))
 		return &presented
 	case *Account:
@@ -709,6 +710,7 @@ func (ca *CA) present(data any) any {
 		for i := range presented.Challenges {
 			presented.Challenges[i].Reservation = nil
 			presented.Challenges[i].Attestation = nil
+			presented.Challenges[i].KeyAuth = ""
 			presented.Challenges[i].URL = ca.url(fmt.Sprintf("/challenge/%s", presented.Challenges[i].ID))
 		}
 		return &presented
@@ -813,6 +815,16 @@ func (ca *CA) generateOrderID() string         { return randomID(16) }
 func (ca *CA) generateAuthorizationID() string { return randomID(16) }
 func (ca *CA) generateChallengeID() string     { return randomID(16) }
 func (ca *CA) generateToken() string           { return randomID(32) }
+
+// keyAuthorization builds the key authorization for a challenge token and
+// account key, RFC 8555 Section 8.1.
+func keyAuthorization(token string, jwk *jose.JSONWebKey) (string, error) {
+	thumbprint, err := jwkThumbprint(jwk)
+	if err != nil {
+		return "", err
+	}
+	return token + "." + thumbprint, nil
+}
 
 func jwkThumbprint(jwk *jose.JSONWebKey) (string, error) {
 	thumbprint, err := jwk.Thumbprint(crypto.SHA256)
@@ -933,6 +945,17 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		AttStmt: attObj.AttStmt,
 	}
 
+	// The key authorization binds the attestation to the account key that
+	// signed this request (RFC 8555 Section 8.1); the formats that sign
+	// over it reject a statement built for another account.
+	keyAuth, err := keyAuthorization(challenge.Token, postData.jwk)
+	if err != nil {
+		ca.logger.ErrorContext(ctx, "Failed to build key authorization", "error", err)
+		ca.writeProblem(ctx, w, InternalServerError("Failed to validate challenge"))
+		return
+	}
+	binding := ChallengeBinding{Token: challenge.Token, KeyAuthorization: keyAuth}
+
 	// The reservation is the persisted processing status under a lease:
 	// duplicate POSTs — concurrent, cross-process, or retries within the
 	// lease — are answered with the current state instead of a second
@@ -949,7 +972,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
+	deviceInfo, err := verifier.Verify(ctx, stmt, binding)
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Attestation verification failed", "challenge_id", challenge.ID, "error", err)
 		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation verification failed"))
@@ -992,7 +1015,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	challenge.settleValid(time.Now(), attObjBytes)
+	challenge.settleValid(time.Now(), attObjBytes, keyAuth)
 	if err := ca.storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
 		// Another writer settled the challenge first; report its result.
 		if lostRace(err) {
@@ -1457,7 +1480,8 @@ func (ca *CA) extractDeviceInfoFromChallenge(ctx context.Context, challenge *Cha
 		AttStmt: attObj.AttStmt,
 	}
 
-	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
+	binding := ChallengeBinding{Token: challenge.Token, KeyAuthorization: challenge.KeyAuth}
+	deviceInfo, err := verifier.Verify(ctx, stmt, binding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to re-verify attestation: %w", err)
 	}
