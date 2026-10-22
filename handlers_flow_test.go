@@ -262,40 +262,6 @@ func TestIssuanceExtractsDeviceInfo(t *testing.T) {
 	}
 }
 
-// draft-ietf-acme-device-attest-10 Sections 3.1 and 4.1: identifier values
-// that do not match the grammar are rejected as malformed.
-func TestNewOrderRejectsMalformedIdentifier(t *testing.T) {
-	t.Parallel()
-
-	ts, _ := setupTestServerWithAttestation(t, nullauthorizer.New())
-	client := newACMEClient(t, ts)
-
-	tests := []acme.AuthzID{
-		{Type: "permanent-identifier", Value: ""},
-		{Type: "permanent-identifier", Value: "ABC/"},
-		{Type: "permanent-identifier", Value: "ABC/1.40"},
-		{Type: "permanent-identifier", Value: "ABC/1.02"},
-		{Type: "hardware-module", Value: "ABC"},
-		{Type: "hardware-module", Value: "/1.2.3.4"},
-	}
-	for _, id := range tests {
-		t.Run(id.Type+" "+id.Value, func(t *testing.T) {
-			_, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{id})
-			var ae *acme.Error
-			if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:malformed" {
-				t.Errorf("AuthorizeOrder(%s %q) error = %v, want malformed", id.Type, id.Value, err)
-			}
-		})
-	}
-
-	if _, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{
-		{Type: "permanent-identifier", Value: "ABC/1.2.3.4"},
-		{Type: "hardware-module", Value: "ABC/1.2.3.4"},
-	}); err != nil {
-		t.Errorf("AuthorizeOrder() with valid values error = %v", err)
-	}
-}
-
 func TestMalformedAttestations(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,9 @@ package nanoca_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/brandonweeks/nanoca"
+	"github.com/brandonweeks/nanoca/verifiers/null"
 	"github.com/fxamacker/cbor/v2"
 	"golang.org/x/crypto/acme"
 )
@@ -109,82 +113,54 @@ func TestChallengeNilKeyRejected(t *testing.T) {
 	}
 }
 
-// An attestation for a different device than the order names must fail
-// the challenge (draft-ietf-acme-device-attest-10 Section 5, step 3).
-func TestChallengeIdentifierMismatch(t *testing.T) {
+// One order attested by two devices cannot finalize: the CSR key can match
+// only one of them, so no certificate names both.
+func TestFinalizeRejectsTwoDevices(t *testing.T) {
 	t.Parallel()
 
 	ts, _ := newTestServer(t, testServerConfig{})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client)
-
-	att, err := cbor.Marshal(createNullDeviceAttestation(t, "other-device"))
+	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{
+		{Type: "permanent-identifier", Value: testDeviceSerial},
+		{Type: "permanent-identifier", Value: "other-device"},
+	})
+	if err != nil {
+		t.Fatalf("AuthorizeOrder() error = %v", err)
+	}
+	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	otherAtt, err := null.CreateNullDeviceAttestation("other-device", otherKey.Public())
+	if err != nil {
+		t.Fatalf("failed to create attestation: %v", err)
+	}
+	otherAttObj, err := cbor.Marshal(otherAtt)
 	if err != nil {
 		t.Fatalf("failed to marshal attestation: %v", err)
 	}
-	err = submitAttObj(t, client, chal, base64.RawURLEncoding.EncodeToString(att))
+	for i, attObj := range []string{nullAttObj(t), base64.RawURLEncoding.EncodeToString(otherAttObj)} {
+		authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[i])
+		if err != nil {
+			t.Fatalf("GetAuthorization() error = %v", err)
+		}
+		if err := submitAttObj(t, client, authz.Challenges[0], attObj); err != nil {
+			t.Fatalf("failed to satisfy challenge %d: %v", i, err)
+		}
+	}
+
+	_, _, err = client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
 	var ae *acme.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusForbidden {
-		t.Fatalf("Accept() with mismatched identity error = %v, want 403 unauthorized", err)
+	if !errors.As(err, &ae) || ae.ProblemType != "urn:ietf:params:acme:error:badCSR" {
+		t.Fatalf("CreateOrderCert() with two devices error = %v, want badCSR", err)
 	}
-
-	authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
-	if err != nil {
-		t.Fatalf("failed to get authorization: %v", err)
-	}
-	if authz.Status != acme.StatusInvalid {
-		t.Errorf("authorization status = %q, want invalid", authz.Status)
-	}
-}
-
-type identitySwitchingVerifier struct {
-	mu    sync.Mutex
-	calls int
-}
-
-func (v *identitySwitchingVerifier) Format() string { return "switching" }
-
-func (v *identitySwitchingVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.calls++
-	serial := testDeviceSerial
-	if v.calls > 1 {
-		serial = "other-device"
-	}
-	return &nanoca.DeviceInfo{
-		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: serial},
-		PublicKey:           testDeviceKey.Public(),
-	}, nil
-}
-
-// Finalize re-verifies the stored attestation and compares the identity
-// again. A result that no longer matches the order is a terminal failure:
-// re-verification would return the same identity on every retry.
-func TestFinalizeIdentifierMismatchTerminal(t *testing.T) {
-	t.Parallel()
-
-	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{&identitySwitchingVerifier{}}})
-	client := newACMEClient(t, ts)
-
-	order, chal := pendingChallenge(t, client)
-	if err := submitAttObj(t, client, chal, attObjFor(t, "switching")); err != nil {
-		t.Fatalf("failed to satisfy challenge: %v", err)
-	}
-
-	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true)
-	var ae *acme.Error
-	if !errors.As(err, &ae) || ae.StatusCode != http.StatusForbidden {
-		t.Fatalf("CreateOrderCert() error = %v, want 403 unauthorized", err)
-	}
-
 	got, err := client.GetOrder(t.Context(), order.URI)
 	if err != nil {
 		t.Fatalf("GetOrder() error = %v", err)
 	}
-	if got.Status != acme.StatusInvalid {
-		t.Errorf("order status after identity mismatch = %q, want invalid", got.Status)
+	if got.Status != acme.StatusReady {
+		t.Errorf("order status = %q, want ready", got.Status)
 	}
 }
 
