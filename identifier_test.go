@@ -85,3 +85,30 @@ func TestDeviceInfoMatches(t *testing.T) {
 		})
 	}
 }
+
+func TestDeviceInfoProject(t *testing.T) {
+	t.Parallel()
+
+	key := "not a real key"
+	apple := &DeviceInfo{
+		PermanentIdentifier: &PermanentIdentifier{Identifier: "TMWFWWWP67"},
+		HardwareModule:      &HardwareModule{Type: asn1.ObjectIdentifier{1, 2, 3}, Value: []byte("UDID")},
+		PublicKey:           key,
+	}
+
+	serial := apple.project(IdentifierTypePermanentIdentifier)
+	if serial.PermanentIdentifier != apple.PermanentIdentifier || serial.HardwareModule != nil || serial.PublicKey != key {
+		t.Errorf("project(permanent-identifier) = %+v, want serial and key only", serial)
+	}
+	hw := apple.project(IdentifierTypeHardwareModule)
+	if hw.HardwareModule != apple.HardwareModule || hw.PermanentIdentifier != nil || hw.PublicKey != key {
+		t.Errorf("project(hardware-module) = %+v, want hardware module and key only", hw)
+	}
+	none := apple.project("dns")
+	if none.PermanentIdentifier != nil || none.HardwareModule != nil || none.PublicKey != key {
+		t.Errorf("project(dns) = %+v, want key only", none)
+	}
+	if apple.HardwareModule == nil || apple.PermanentIdentifier == nil {
+		t.Error("project modified its receiver")
+	}
+}

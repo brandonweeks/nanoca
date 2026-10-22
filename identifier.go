@@ -69,3 +69,17 @@ func (d *DeviceInfo) matches(id Identifier) bool {
 	value := d.identifierValue(id.Type)
 	return value != "" && value == id.Value
 }
+
+// project returns a copy of d that carries only the identity of the given
+// type and the attested key, so a certificate names exactly the identifiers
+// the order asked for.
+func (d *DeviceInfo) project(typ string) *DeviceInfo {
+	p := &DeviceInfo{PublicKey: d.PublicKey}
+	switch typ {
+	case IdentifierTypePermanentIdentifier:
+		p.PermanentIdentifier = d.PermanentIdentifier
+	case IdentifierTypeHardwareModule:
+		p.HardwareModule = d.HardwareModule
+	}
+	return p
+}

@@ -1379,8 +1379,13 @@ func (ca *CA) failOrder(ctx context.Context, orderID, token string, err error) e
 // it proved would silently strip the SANs from the certificate. An empty
 // result means no authorization reads valid — inconsistent state that may
 // heal — so it is refused as retriable rather than issued identity-less.
+//
+// Each result carries only the identity type its authorization named, and
+// an identifier the order repeats is returned once, so the certificate's
+// SANs are exactly the order's identifiers.
 func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceInfo, error) {
 	var deviceInfos []*DeviceInfo
+	seen := make(map[Identifier]bool)
 	for _, authzID := range order.AuthorizationIDs {
 		authz, err := ca.storage.GetAuthorization(ctx, authzID)
 		if err != nil {
@@ -1394,9 +1399,10 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 		if authz.expired() {
 			return nil, Unauthorized("Authorization has expired")
 		}
-		if authz.Status != AuthzStatusValid {
+		if authz.Status != AuthzStatusValid || seen[authz.Identifier] {
 			continue
 		}
+		seen[authz.Identifier] = true
 
 		for _, challengeID := range authz.ChallengeIDs {
 			challenge, err := ca.storage.GetChallenge(ctx, challengeID)
@@ -1416,7 +1422,7 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 			if !deviceInfo.matches(authz.Identifier) {
 				return nil, Unauthorized("Attestation does not match the order identifier")
 			}
-			deviceInfos = append(deviceInfos, deviceInfo)
+			deviceInfos = append(deviceInfos, deviceInfo.project(authz.Identifier.Type))
 			break
 		}
 	}
