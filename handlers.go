@@ -400,6 +400,10 @@ func (ca *CA) handleNewOrder(w http.ResponseWriter, r *http.Request) {
 			ca.writeProblem(ctx, w, UnsupportedIdentifier(fmt.Sprintf("Unsupported identifier type %q", identifier.Type)))
 			return
 		}
+		if err := validateIdentifier(identifier); err != nil {
+			ca.writeProblem(ctx, w, Malformed(fmt.Sprintf("Invalid %s value: %v", identifier.Type, err)))
+			return
+		}
 	}
 
 	order, err := ca.createOrder(ctx, postData.accountID, orderReq)
@@ -959,6 +963,14 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
+	// The attested identity must match the identifier in the order
+	// (draft-ietf-acme-device-attest-10 Section 5, step 3).
+	if !deviceInfo.matches(authz.Identifier) {
+		ca.logger.WarnContext(ctx, "Attested identity does not match order identifier", "challenge_id", challenge.ID, "identifier", authz.Identifier.Value, "attested", deviceInfo.identifierValue(authz.Identifier.Type))
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation does not match the order identifier"))
+		return
+	}
+
 	authorized, err := ca.authorizer.Authorize(ctx, deviceInfo)
 	if err != nil {
 		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
@@ -1392,9 +1404,13 @@ func (ca *CA) deviceInfosForOrder(ctx context.Context, order *Order) ([]*DeviceI
 			if err != nil {
 				return nil, fmt.Errorf("failed to extract device info: %w", err)
 			}
-			if deviceInfo != nil {
-				deviceInfos = append(deviceInfos, deviceInfo)
+			if deviceInfo == nil {
+				break
 			}
+			if !deviceInfo.matches(authz.Identifier) {
+				return nil, Unauthorized("Attestation does not match the order identifier")
+			}
+			deviceInfos = append(deviceInfos, deviceInfo)
 			break
 		}
 	}

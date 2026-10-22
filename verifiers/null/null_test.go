@@ -22,7 +22,7 @@ func TestAttestationVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
-	att, err := CreateNullDeviceAttestation(key.Public())
+	att, err := CreateNullDeviceAttestation("SN123", key.Public())
 	if err != nil {
 		t.Fatalf("CreateNullDeviceAttestation() error = %v", err)
 	}
@@ -48,17 +48,22 @@ func TestAttestationVerifier(t *testing.T) {
 		},
 		{
 			name:    "missing pub",
-			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{}},
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"serial": "SN123"}},
+			wantErr: true,
+		},
+		{
+			name:    "missing serial",
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"pub": attStmt["pub"]}},
 			wantErr: true,
 		},
 		{
 			name:    "malformed pub",
-			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"pub": []byte{0x30, 0x00}}},
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"serial": "SN123", "pub": []byte{0x30, 0x00}}},
 			wantErr: true,
 		},
 		{
 			name:    "extra attStmt fields",
-			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"pub": attStmt["pub"], "key": "value"}},
+			stmt:    nanoca.AttestationStatement{Format: "null", AttStmt: map[string]any{"serial": "SN123", "pub": attStmt["pub"], "key": "value"}},
 			wantErr: false,
 		},
 	}
@@ -75,8 +80,8 @@ func TestAttestationVerifier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Verify() failed: %v", err)
 			}
-			if deviceInfo.PermanentIdentifier.Identifier != "null-attestation-device" {
-				t.Errorf("PermanentIdentifier.Identifier = %s, want null-attestation-device",
+			if deviceInfo.PermanentIdentifier.Identifier != "SN123" {
+				t.Errorf("PermanentIdentifier.Identifier = %s, want SN123",
 					deviceInfo.PermanentIdentifier.Identifier)
 			}
 			if !key.PublicKey.Equal(deviceInfo.PublicKey) {

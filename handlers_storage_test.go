@@ -392,7 +392,7 @@ func TestFinalizeSurvivesOrderRereadFailure(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "vanishing-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestFinalizeDeviceInfoStorageFailure(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "attested-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestFinalizeRetryAfterCompletionFailure(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "retry-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestCertificateUnreferencedByOrderNotServed(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "zombie-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestFinalizeConcurrentIssuesOnce(t *testing.T) {
 	ts := newStorageTestServer(t, newTestStorage(t), issuer)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "concurrent-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -649,7 +649,7 @@ func TestChallengeConcurrentDuplicateSubmission(t *testing.T) {
 	ts := newStorageTestServer(t, storage, stubIssuer{})
 
 	client := newACMEClient(t, ts)
-	_, chal := pendingChallenge(t, client, "racing-device")
+	_, chal := pendingChallenge(t, client)
 
 	payload, err := json.Marshal(map[string]any{"attObj": nullAttObj(t)})
 	if err != nil {
@@ -703,7 +703,7 @@ func TestFinalizeUnreadableAttestationTerminal(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "legacy-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -794,8 +794,8 @@ func TestFinalizeReservationSurvivesAuthzUpdate(t *testing.T) {
 
 	client := newACMEClient(t, ts)
 	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{
-		{Type: "permanent-identifier", Value: "device-a"},
-		{Type: "permanent-identifier", Value: "device-b"},
+		{Type: "permanent-identifier", Value: testDeviceSerial},
+		{Type: "permanent-identifier", Value: testDeviceSerial},
 	})
 	if err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -861,7 +861,7 @@ func TestOrderPollsProcessingDuringFinalize(t *testing.T) {
 	ts := newStorageTestServer(t, newTestStorage(t), issuer)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "polling-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -946,7 +946,7 @@ func TestFinalizeRecoversAfterRollbackFailure(t *testing.T) {
 	ts := newShortLeaseTestServer(t, storage, &failOnceIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "outage-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1003,7 +1003,7 @@ func TestChallengeRecoversFromInterruptedValidation(t *testing.T) {
 	ts := newShortLeaseTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	_, chal := pendingChallenge(t, client, "interrupted-device")
+	_, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
 		t.Fatal("Accept() error = nil, want failure from interrupted validation")
 	}
@@ -1036,7 +1036,7 @@ func TestFinalizeForeignAccountDoesNotReserveOrder(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	owner := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, owner, "owned-device")
+	order, chal := pendingChallenge(t, owner)
 	if err := submitAttObj(t, owner, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1117,7 +1117,7 @@ func TestChallengeValidStatusMismatchReportsState(t *testing.T) {
 	ts := newStorageTestServer(t, storage, stubIssuer{})
 
 	client := newACMEClient(t, ts)
-	_, chal := pendingChallenge(t, client, "raced-device")
+	_, chal := pendingChallenge(t, client)
 
 	err := submitAttObj(t, client, chal, nullAttObj(t))
 	var ae *acme.Error
@@ -1163,7 +1163,7 @@ func TestOrderStatusChangeLoggedOnlyOnTransition(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{logger: logger, issuer: stubIssuer{}, storage: &orderStatusRacedStorage{Storage: newTestStorage(t)}})
 
 	client := newACMEClient(t, ts)
-	_, chal := pendingChallenge(t, client, "settled-device")
+	_, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1183,7 +1183,7 @@ func TestFinalizeZombieCannotPersistStaleCSR(t *testing.T) {
 	ts := newShortLeaseTestServer(t, newTestStorage(t), issuer)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "zombie-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1246,7 +1246,7 @@ func TestOrderRecoversFromAbandonedReservation(t *testing.T) {
 	ts := newShortLeaseTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "abandoned-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1323,7 +1323,7 @@ func TestFinalizeRefusesOrderWithoutValidAuthz(t *testing.T) {
 	ts := newStorageTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "demoted-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1357,7 +1357,7 @@ func TestSettledAuthorizationComposesChallenges(t *testing.T) {
 	ts := newStorageTestServer(t, storage, nil)
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "composed-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -1426,7 +1426,7 @@ func TestFinalizeCompletionRaceNonRetriable(t *testing.T) {
 	ts := newStorageTestServer(t, storage, selfSignedIssuer{})
 
 	client := newACMEClient(t, ts)
-	order, chal := pendingChallenge(t, client, "reclaimed-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}

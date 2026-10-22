@@ -54,7 +54,7 @@ func TestExpiredOrderPollsInvalid(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{storage: storage})
 	client := newACMEClient(t, ts)
 
-	order, _ := pendingChallenge(t, client, "expiring-device")
+	order, _ := pendingChallenge(t, client)
 	if order.Expires.IsZero() {
 		t.Error("new order carries no expires")
 	}
@@ -79,7 +79,7 @@ func TestFinalizeExpiredOrder(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{storage: storage})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "expired-finalize-device")
+	order, chal := pendingChallenge(t, client)
 	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestExpiredAuthorizationRefusesChallenge(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{storage: storage})
 	client := newACMEClient(t, ts)
 
-	order, chal := pendingChallenge(t, client, "expired-authz-device")
+	order, chal := pendingChallenge(t, client)
 	expireAuthorization(t, storage, order.AuthzURLs[0])
 
 	authz, err := client.GetAuthorization(t.Context(), order.AuthzURLs[0])
@@ -137,7 +137,7 @@ func TestExpiredAuthorizationSettlesOrderInvalid(t *testing.T) {
 	ts, _ := newTestServer(t, testServerConfig{storage: storage})
 	client := newACMEClient(t, ts)
 
-	order, _ := pendingChallenge(t, client, "expired-authz-order-device")
+	order, _ := pendingChallenge(t, client)
 	expireAuthorization(t, storage, order.AuthzURLs[0])
 
 	got, err := client.GetOrder(t.Context(), order.URI)
@@ -185,8 +185,8 @@ func TestFinalizeRefusesOrderWithExpiredAuthorization(t *testing.T) {
 	client := newACMEClient(t, ts)
 
 	order, err := client.AuthorizeOrder(t.Context(), []acme.AuthzID{
-		{Type: "permanent-identifier", Value: "expired-half-a"},
-		{Type: "permanent-identifier", Value: "expired-half-b"},
+		{Type: "permanent-identifier", Value: testDeviceSerial},
+		{Type: "permanent-identifier", Value: testDeviceSerial},
 	})
 	if err != nil {
 		t.Fatalf("AuthorizeOrder() error = %v", err)
@@ -249,7 +249,7 @@ func TestOrdersListOmitsOrderWithExpiredAuthorization(t *testing.T) {
 		t.Fatalf("failed to register account: %v", err)
 	}
 
-	order, _ := pendingChallenge(t, client, "list-expired-authz-device")
+	order, _ := pendingChallenge(t, client)
 	expireAuthorization(t, storage, order.AuthzURLs[0])
 
 	// Fetched before any poll, so the order is still stored pending.
