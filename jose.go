@@ -45,7 +45,7 @@ func (ca *CA) parseJWS(body string) (*jose.JSONWebSignature, error) {
 		Protected  string  `json:"protected"`
 	}
 	if err := json.Unmarshal([]byte(body), &unprotected); err != nil {
-		return nil, Malformed(fmt.Sprint("Parse error reading JWS: ", err.Error()))
+		return nil, Malformed("Parse error reading JWS").WithCause(err)
 	}
 
 	// RFC 8555 Section 6.2: "The JWS Unprotected Header [RFC7515] MUST NOT be used"
@@ -125,13 +125,11 @@ func (ca *CA) validateJWSStructure(jws *jose.JSONWebSignature) error {
 	return nil
 }
 
-// RFC 8555 Section 6.4
+// RFC 8555 Section 6.4. The expected URL is built from the configured base
+// URL, not the Host header, so a request is accepted only for the URL this
+// CA publishes in its directory. TLS termination is the deployment's job.
 func (ca *CA) validateRequestURL(jwsURL string, r *http.Request) error {
-	if r.TLS == nil {
-		return errors.New("HTTPS is required")
-	}
-
-	expectedURL := fmt.Sprintf("https://%s%s", r.Host, r.URL.Path)
+	expectedURL := ca.baseURL + r.URL.Path
 
 	if jwsURL != expectedURL {
 		return fmt.Errorf("JWS url header %q does not match request URL %q", jwsURL, expectedURL)
@@ -169,7 +167,7 @@ func (ca *CA) verifyJWSWithKey(jws *jose.JSONWebSignature, pubKey *jose.JSONWebK
 
 	payload, err := jws.Verify(pubKey)
 	if err != nil {
-		return nil, fmt.Errorf("signature verification failed: %w", err)
+		return nil, errors.New("signature verification failed")
 	}
 
 	result := &authenticatedPOST{

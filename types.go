@@ -118,6 +118,15 @@ type Nonce struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+// Account status values, RFC 8555 Section 7.1.2. Nothing in nanoca moves
+// an account out of valid; an operator does that by editing the stored
+// record, and lookupJWK then refuses its requests.
+const (
+	AccountStatusValid       = "valid"
+	AccountStatusDeactivated = "deactivated"
+	AccountStatusRevoked     = "revoked"
+)
+
 type Account struct {
 	ID                   string           `json:"id"`
 	Key                  *jose.JSONWebKey `json:"key,omitempty"`

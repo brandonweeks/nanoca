@@ -38,3 +38,14 @@ defer ca.Close()
 mux := http.NewServeMux()
 mux.Handle("/", ca.Handler())
 ```
+
+## Deployment
+
+- Terminate TLS on the listener or in a proxy in front of the handler. The
+  JWS `url` check compares against the configured base URL, so the base URL
+  must be the `https://` URL clients use.
+- Rate limit the ACME endpoints at the proxy. Account creation and
+  `/new-nonce` are unauthenticated, and every request stores a nonce for an
+  hour, so request volume is storage volume.
+- Orders, authorizations, and challenges are kept until the operator prunes
+  them. The storage backend does not expire them.
