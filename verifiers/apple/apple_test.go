@@ -1,6 +1,7 @@
 package apple
 
 import (
+	"crypto/ecdsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -147,6 +148,10 @@ func TestExtractDeviceInfo(t *testing.T) {
 	expectedUDID := "00006030-000651690A84001C"
 	if string(deviceInfo.HardwareModule.Value) != expectedUDID {
 		t.Errorf("expected UDID %s, got %s", expectedUDID, string(deviceInfo.HardwareModule.Value))
+	}
+
+	if !cert.PublicKey.(*ecdsa.PublicKey).Equal(deviceInfo.PublicKey) {
+		t.Error("expected PublicKey to be the leaf certificate's key")
 	}
 }
 

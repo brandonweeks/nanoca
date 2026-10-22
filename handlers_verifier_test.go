@@ -78,6 +78,69 @@ func TestChallengeNilDeviceInfoRejected(t *testing.T) {
 	}
 }
 
+type nilKeyVerifier struct{}
+
+func (nilKeyVerifier) Format() string { return "nilkey" }
+
+func (nilKeyVerifier) Verify(context.Context, nanoca.AttestationStatement, []byte) (*nanoca.DeviceInfo, error) {
+	return &nanoca.DeviceInfo{
+		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "nil-key-device"},
+	}, nil
+}
+
+// A verifier that returns a device identity but no public key must fail
+// the challenge. If the challenge became valid, finalize could not check
+// the CSR key and the order could never complete.
+func TestChallengeNilKeyRejected(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{verifiers: []nanoca.AttestationVerifier{nilKeyVerifier{}}})
+	client := newACMEClient(t, ts)
+
+	_, chal := pendingChallenge(t, client, "nil-key-device")
+
+	err := submitAttObj(t, client, chal, attObjFor(t, "nilkey"))
+	if err == nil {
+		t.Fatal("Accept() error = nil, want rejection of key-less attestation")
+	}
+	var ae *acme.Error
+	if errors.As(err, &ae) && ae.StatusCode >= http.StatusInternalServerError {
+		t.Errorf("challenge POST status = %d, want non-5xx rejection", ae.StatusCode)
+	}
+}
+
+// A CSR for a key other than the attested key gets badCSR. The order stays
+// ready, so the client can finalize again with the attested key.
+func TestFinalizeRejectsUnattestedKey(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{})
+	client := newACMEClient(t, ts)
+
+	order, chal := pendingChallenge(t, client, "unattested-key-device")
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("failed to satisfy challenge: %v", err)
+	}
+
+	_, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, csrFor(t, client.Key), true)
+	var ae *acme.Error
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusBadRequest || ae.ProblemType != "urn:ietf:params:acme:error:badCSR" {
+		t.Fatalf("CreateOrderCert() with unattested key error = %v, want 400 badCSR", err)
+	}
+
+	got, err := client.GetOrder(t.Context(), order.URI)
+	if err != nil {
+		t.Fatalf("GetOrder() error = %v", err)
+	}
+	if got.Status != acme.StatusReady {
+		t.Errorf("order status after rejected CSR = %q, want ready", got.Status)
+	}
+
+	if _, _, err := client.CreateOrderCert(t.Context(), order.FinalizeURL, newCSR(t), true); err != nil {
+		t.Fatalf("CreateOrderCert() with attested key error = %v", err)
+	}
+}
+
 type captureVerifier struct {
 	mu    sync.Mutex
 	stmts []nanoca.AttestationStatement
@@ -91,6 +154,7 @@ func (v *captureVerifier) Verify(_ context.Context, stmt nanoca.AttestationState
 	v.stmts = append(v.stmts, stmt)
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "captured-device"},
+		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
 

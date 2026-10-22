@@ -2,6 +2,7 @@ package apple
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -146,11 +147,11 @@ func (a *AttestationVerifier) extractDeviceInfo(cert *x509.Certificate) *nanoca.
 		}
 	}
 
-	return newDeviceInfo(serialNumber, udid)
+	return newDeviceInfo(serialNumber, udid, cert.PublicKey)
 }
 
-func newDeviceInfo(serialNumber, udid string) *nanoca.DeviceInfo {
-	deviceInfo := &nanoca.DeviceInfo{}
+func newDeviceInfo(serialNumber, udid string, publicKey crypto.PublicKey) *nanoca.DeviceInfo {
+	deviceInfo := &nanoca.DeviceInfo{PublicKey: publicKey}
 
 	if serialNumber != "" {
 		// RFC 4043: when Assigner is absent, the certificate issuer is the assigner.

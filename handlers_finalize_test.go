@@ -3,6 +3,7 @@ package nanoca_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -45,12 +46,21 @@ func (failingObserver) OnIssuance(context.Context, *nanoca.IssuanceEvent) error 
 	return errors.New("observer failed")
 }
 
-func newCSR(t *testing.T) []byte {
-	t.Helper()
+var testDeviceKey = func() *ecdsa.PrivateKey {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("failed to generate key: %v", err)
+		panic(err)
 	}
+	return key
+}()
+
+func newCSR(t *testing.T) []byte {
+	t.Helper()
+	return csrFor(t, testDeviceKey)
+}
+
+func csrFor(t *testing.T, key crypto.Signer) []byte {
+	t.Helper()
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "device"}}, key)
 	if err != nil {
 		t.Fatalf("failed to create CSR: %v", err)
