@@ -32,11 +32,13 @@ func (m *mockIssuanceObserver) OnIssuance(_ context.Context, _ *nanoca.IssuanceE
 	return nil
 }
 
-func createNullDeviceAttestation() map[string]any {
-	return map[string]any{
-		"fmt":     "null",
-		"attStmt": map[string]any{},
+func createNullDeviceAttestation(t *testing.T) map[string]any {
+	t.Helper()
+	att, err := null.CreateNullDeviceAttestation(testDeviceKey.Public())
+	if err != nil {
+		t.Fatalf("failed to create attestation: %v", err)
 	}
+	return att
 }
 
 func TestDeviceAttestationFlow(t *testing.T) {
@@ -109,7 +111,7 @@ func TestDeviceAttestationFlow(t *testing.T) {
 		t.Fatalf("Failed to retrieve order: %v", err)
 	}
 
-	nullAttestation := createNullDeviceAttestation()
+	nullAttestation := createNullDeviceAttestation(t)
 
 	attObjBytes, err := cbor.Marshal(nullAttestation)
 	if err != nil {
@@ -156,11 +158,6 @@ func TestDeviceAttestationFlow(t *testing.T) {
 	}
 
 	if retrievedOrder.Status == acme.StatusReady || retrievedOrder.Status == acme.StatusPending {
-		certKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			t.Fatalf("Failed to generate certificate key: %v", err)
-		}
-
 		csrTemplate := &x509.CertificateRequest{
 			Subject: pkix.Name{
 				CommonName:   "Device Certificate",
@@ -168,7 +165,7 @@ func TestDeviceAttestationFlow(t *testing.T) {
 			},
 		}
 
-		csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, certKey)
+		csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, testDeviceKey)
 		if err != nil {
 			t.Fatalf("Failed to create CSR: %v", err)
 		}

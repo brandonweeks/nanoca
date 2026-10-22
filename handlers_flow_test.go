@@ -80,7 +80,7 @@ func submitAttObj(t *testing.T, client *acme.Client, chal *acme.Challenge, attOb
 
 func nullAttObj(t *testing.T) string {
 	t.Helper()
-	b, err := cbor.Marshal(createNullDeviceAttestation())
+	b, err := cbor.Marshal(createNullDeviceAttestation(t))
 	if err != nil {
 		t.Fatalf("failed to marshal attestation: %v", err)
 	}
@@ -241,11 +241,7 @@ func TestIssuanceExtractsDeviceInfo(t *testing.T) {
 	client := newACMEClient(t, ts)
 
 	order, chal := pendingChallenge(t, client, "deviceinfo-device")
-	att, err := cbor.Marshal(map[string]any{"fmt": "null", "attStmt": map[string]any{"fmt": "null"}})
-	if err != nil {
-		t.Fatalf("failed to marshal attestation: %v", err)
-	}
-	if err := submitAttObj(t, client, chal, base64.RawURLEncoding.EncodeToString(att)); err != nil {
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
 		t.Fatalf("failed to satisfy challenge: %v", err)
 	}
 

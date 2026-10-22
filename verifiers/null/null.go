@@ -2,13 +2,17 @@ package null
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
+	"errors"
 	"fmt"
 
 	"github.com/brandonweeks/nanoca"
 )
 
 // AttestationVerifier implements the "null" attestation format
-// This format is always valid but provides no cryptographic proof
+// This format is always valid but provides no cryptographic proof. The
+// "pub" field carries the key to certify as a DER SubjectPublicKeyInfo.
 type AttestationVerifier struct{}
 
 // New creates a new null attestation verifier
@@ -25,18 +29,32 @@ func (n *AttestationVerifier) Verify(_ context.Context, stmt nanoca.AttestationS
 		return nil, fmt.Errorf("format mismatch: expected null, got %s", stmt.Format)
 	}
 
+	pubDER, ok := stmt.AttStmt["pub"].([]byte)
+	if !ok {
+		return nil, errors.New("null attestation statement missing pub field")
+	}
+	publicKey, err := x509.ParsePKIXPublicKey(pubDER)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse pub field: %w", err)
+	}
+
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{
 			Identifier: "null-attestation-device",
 		},
+		PublicKey: publicKey,
 	}, nil
 }
 
-// CreateNullDeviceAttestation creates a null ACME Device Attestation object
-// for testing and development scenarios where no actual device attestation is available
-func CreateNullDeviceAttestation() map[string]any {
+// CreateNullDeviceAttestation creates a null attestation object that names publicKey.
+// It is for testing and development, where no real device attestation is available.
+func CreateNullDeviceAttestation(publicKey crypto.PublicKey) (map[string]any, error) {
+	pubDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
 	return map[string]any{
 		"fmt":     "null",
-		"attStmt": map[string]any{},
-	}
+		"attStmt": map[string]any{"pub": pubDER},
+	}, nil
 }

@@ -3,6 +3,7 @@ package nanoca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/x509"
 	"encoding/asn1"
 	"time"
@@ -22,6 +23,7 @@ type AttestationStatement struct {
 // PermanentIdentifier contains device serial numbers or similar persistent identifiers.
 // HardwareModule contains hardware-specific identifiers like UDIDs or TPM data.
 type DeviceInfo struct {
+	PublicKey           crypto.PublicKey
 	PermanentIdentifier *PermanentIdentifier
 	HardwareModule      *HardwareModule
 }

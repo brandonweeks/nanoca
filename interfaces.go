@@ -7,9 +7,10 @@ import (
 
 type AttestationVerifier interface {
 	Format() string
-	// Verify returns the device identity the statement proves; the identity
-	// is what authorization and the certificate's SANs are built from, so a
-	// nil DeviceInfo with a nil error is treated as a failed attestation.
+	// Verify returns the device identity that the statement proves. The CA
+	// authorizes the device and builds the certificate SANs from this
+	// identity, and certifies only its PublicKey. A nil DeviceInfo or a nil
+	// PublicKey with a nil error is a failed attestation.
 	Verify(ctx context.Context, stmt AttestationStatement, challenge []byte) (*DeviceInfo, error)
 }
 

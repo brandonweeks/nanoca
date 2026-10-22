@@ -949,12 +949,13 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation verification failed"))
 		return
 	}
-	// A validation that proves no identity must not settle valid: finalize
-	// derives the certificate's SANs from the DeviceInfo and refuses an
-	// order that yields none, so accepting it here would wedge the order.
-	if deviceInfo == nil {
-		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity", "challenge_id", challenge.ID, "format", attObj.Format)
-		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation yielded no device identity"))
+	// Reject an attestation that has no device identity or no public key.
+	// Finalize builds the certificate SANs from the DeviceInfo and rejects a
+	// CSR for any other key. If the challenge became valid here, the order
+	// could never finalize.
+	if deviceInfo == nil || deviceInfo.PublicKey == nil {
+		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity or key", "challenge_id", challenge.ID, "format", attObj.Format)
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation yielded no device identity or key"))
 		return
 	}
 
@@ -1283,6 +1284,10 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 		return nil, nil, ca.failOrder(ctx, order.ID, token, err)
 	}
 
+	if err := checkCSRKeyAttested(csr, deviceInfos); err != nil {
+		return nil, nil, ca.failOrder(ctx, order.ID, token, err)
+	}
+
 	cert, err := ca.certificateIssuer.IssueCertificate(ctx, csr, deviceInfos)
 	if err != nil {
 		return nil, nil, ca.failOrder(ctx, order.ID, token, fmt.Errorf("failed to issue certificate: %w", err))
@@ -1307,6 +1312,22 @@ func (ca *CA) issueForOrder(ctx context.Context, order *Order, csr *x509.Certifi
 	}
 
 	return cert, deviceInfos, nil
+}
+
+// checkCSRKeyAttested rejects a CSR whose public key is not the key in the
+// attestation (draft-ietf-acme-device-attest-10 Section 8). Without this
+// check, an attacker can replay a real device's attestation and get a
+// certificate for a software key. The error is badCSR, so the order stays
+// ready and the client can send a CSR for the attested key (RFC 8555
+// Section 7.4).
+func checkCSRKeyAttested(csr *x509.CertificateRequest, deviceInfos []*DeviceInfo) error {
+	key, ok := csr.PublicKey.(interface{ Equal(crypto.PublicKey) bool })
+	for _, deviceInfo := range deviceInfos {
+		if !ok || !key.Equal(deviceInfo.PublicKey) {
+			return BadCSR("CSR public key does not match the attested key")
+		}
+	}
+	return nil
 }
 
 // failOrder releases the finalize reservation, distinguishing terminal

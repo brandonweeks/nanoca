@@ -56,6 +56,7 @@ func (v *gateVerifier) Verify(context.Context, nanoca.AttestationStatement, []by
 	}
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "gate-device"},
+		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
 
@@ -268,6 +269,7 @@ func (v *flakyReverifyVerifier) Verify(context.Context, nanoca.AttestationStatem
 	}
 	return &nanoca.DeviceInfo{
 		PermanentIdentifier: &nanoca.PermanentIdentifier{Identifier: "flaky-device"},
+		PublicKey:           testDeviceKey.Public(),
 	}, nil
 }
 
