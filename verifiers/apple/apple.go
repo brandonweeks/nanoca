@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/brandonweeks/nanoca"
 )
@@ -29,19 +30,37 @@ var (
 type AttestationVerifier struct {
 	logger       *slog.Logger
 	trustedRoots *x509.CertPool
+	now          func() time.Time
+}
+
+// Option configures an AttestationVerifier.
+type Option func(*AttestationVerifier)
+
+// WithClock sets the time the attestation chain is validated at. The default
+// is the wall clock. Apple's attestation leaf is valid for three months, so a
+// test that replays a recorded attestation needs the time it was recorded.
+func WithClock(now func() time.Time) Option {
+	return func(a *AttestationVerifier) {
+		a.now = now
+	}
 }
 
 // New creates a new Apple attestation verifier
-func New(logger *slog.Logger) *AttestationVerifier {
+func New(logger *slog.Logger, opts ...Option) *AttestationVerifier {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(appleRootCertPEM) {
 		panic("failed to parse embedded Apple Enterprise Attestation Root CA certificate")
 	}
 
-	return &AttestationVerifier{
+	a := &AttestationVerifier{
 		logger:       logger,
 		trustedRoots: pool,
+		now:          time.Now,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Format returns the attestation format identifier.
@@ -128,6 +147,7 @@ func (a *AttestationVerifier) verifyCertificateChain(certChain []*x509.Certifica
 	opts := x509.VerifyOptions{
 		Roots:         a.trustedRoots,
 		Intermediates: intermediates,
+		CurrentTime:   a.now(),
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}
 
