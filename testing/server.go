@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,7 +16,12 @@ import (
 	filesigner "github.com/brandonweeks/nanoca/signers/file"
 	"github.com/brandonweeks/nanoca/storage/badger"
 	"github.com/brandonweeks/nanoca/verifiers/apple"
+	tpmverifier "github.com/brandonweeks/nanoca/verifiers/tpm"
 )
+
+// akCARootPath holds the attestation CA root whose AK certificates the TPM
+// verifier accepts. The TPM format is registered only when the file is there.
+const akCARootPath = "ak_ca.crt"
 
 func main() {
 	logger := slog.New(nanoca.NewContextHandler(slog.Default().Handler()))
@@ -47,14 +53,24 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("creating storage: %w", err)
 	}
 
+	opts := []nanoca.Option{
+		nanoca.WithObserver(stderrobserver.New(logger)),
+		nanoca.WithVerifier(apple.New(logger)),
+	}
+	if verifier, err := tpmVerifier(logger); err != nil {
+		return err
+	} else if verifier != nil {
+		opts = append(opts, nanoca.WithVerifier(verifier))
+		logger.Info("Registered the TPM attestation format", "ak_ca_root", akCARootPath)
+	}
+
 	ca, err := nanoca.New(
 		logger,
 		certificateIssuer,
 		nullauthorizer.New(),
 		storage,
 		"https://localhost:8443",
-		nanoca.WithObserver(stderrobserver.New(logger)),
-		nanoca.WithVerifier(apple.New(logger)),
+		opts...,
 	)
 	if err != nil {
 		return fmt.Errorf("creating CA: %w", err)
@@ -66,6 +82,26 @@ func run(logger *slog.Logger) error {
 
 	//nolint:gosec
 	return http.ListenAndServeTLS(":8443", "server.crt", "server.key", ca.Handler())
+}
+
+// tpmVerifier builds the TPM verifier from the attestation CA root, or
+// returns nil when there is no root to trust.
+func tpmVerifier(logger *slog.Logger) (nanoca.AttestationVerifier, error) {
+	root, err := loadCertificate(akCARootPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("loading AK CA root: %w", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(root)
+	verifier, err := tpmverifier.New(logger, roots)
+	if err != nil {
+		return nil, fmt.Errorf("creating TPM verifier: %w", err)
+	}
+	return verifier, nil
 }
 
 func loadCertificate(path string) (*x509.Certificate, error) {

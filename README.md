@@ -39,6 +39,22 @@ mux := http.NewServeMux()
 mux.Handle("/", ca.Handler())
 ```
 
+## Attestation formats
+
+- `verifiers/apple` verifies Apple Managed Device Attestation. The device
+  identity comes from the attestation certificate's Apple extensions, and the
+  statement is bound to the challenge token.
+- `verifiers/tpm` verifies TPM 2.0 attestation: a certification by the
+  device's attestation key (AK) that the key to certify lives in its TPM. It
+  takes the roots of the attestation CA that issues AK certificates to your
+  devices, since there is no industry-wide root for them:
+  `tpm.New(logger, roots)`. The device identity comes from the AK
+  certificate's subjectAltName, the certified key comes from `pubArea`, and
+  the certification is bound to the key authorization.
+- `verifiers/null` accepts any statement. Never register it next to a real
+  verifier: the client picks the format, so any client could then skip
+  attestation.
+
 ## Deployment
 
 - Terminate TLS on the listener or in a proxy in front of the handler. The
