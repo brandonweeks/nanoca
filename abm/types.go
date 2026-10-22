@@ -3,6 +3,7 @@ package abm
 import (
 	"crypto"
 	"net/http"
+	"time"
 )
 
 // Apple Business Manager API values for Config.
@@ -16,23 +17,45 @@ const (
 // assertion. It differs from the token URL the assertion is posted to.
 const assertionAudience = "https://account.apple.com/auth/oauth2/v2/token"
 
+// pageLimit is the largest page size the API allows.
+const pageLimit = 1000
+
+// Values of Device.Status.
+const (
+	DeviceStatusAssigned   = "ASSIGNED"
+	DeviceStatusUnassigned = "UNASSIGNED"
+)
+
 // Device represents a device in the ABM organization
 type Device struct {
 	SerialNumber string `json:"serialNumber"`
 	Model        string `json:"deviceModel"`
+
+	// Status is DeviceStatusAssigned if the device is assigned to a
+	// device management service, and DeviceStatusUnassigned otherwise.
+	Status string `json:"status"`
 }
 
 // deviceData represents the JSON:API data wrapper for a device
 type deviceData struct {
 	Type       string `json:"type"`
 	ID         string `json:"id"`
-	Attributes Device `json:"attributes"`
+	Attributes struct {
+		Device
+		ReleasedFromOrgDateTime *time.Time `json:"releasedFromOrgDateTime"`
+	} `json:"attributes"`
 }
 
-// devicesResponse represents one page of the JSON:API response from the
-// Get Organization Devices endpoint
-type devicesResponse struct {
-	Data  []deviceData `json:"data"`
+// resourceID is a JSON:API resource identifier, as returned by
+// relationship endpoints. For devices the ID is the serial number.
+type resourceID struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// page represents one page of a JSON:API collection response
+type page[T any] struct {
+	Data  []T `json:"data"`
 	Links struct {
 		Next string `json:"next"`
 	} `json:"links"`
@@ -40,8 +63,16 @@ type devicesResponse struct {
 
 // ErrorResponse represents an error response from the ABM API
 type ErrorResponse struct {
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
+	Errors []Error `json:"errors"`
+}
+
+// Error describes one problem in an ErrorResponse.
+type Error struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Code   string `json:"code"`
+	Title  string `json:"title"`
+	Detail string `json:"detail"`
 }
 
 // Config holds the configuration for the ABM API client

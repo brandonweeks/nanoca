@@ -3,6 +3,7 @@ package abm_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/brandonweeks/nanoca/abm"
@@ -73,5 +74,52 @@ func TestNewUsesHTTPClient(t *testing.T) {
 	}
 	if httpClient.Transport != transport {
 		t.Error("New modified the caller's HTTP client")
+	}
+}
+
+func TestNewKeepsRedirectsOnAPIHost(t *testing.T) {
+	t.Parallel()
+
+	var cfg abm.TokenConfig
+	ts := newTokenServer(t, func() abm.TokenConfig { return cfg })
+	cfg = tokenConfig(t, ts.URL)
+
+	var leaked atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Store(true)
+		}
+	}))
+	t.Cleanup(other.Close)
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same/orgDevices":
+			http.Redirect(w, r, "/v1/orgDevices", http.StatusFound)
+		case "/other/orgDevices":
+			http.Redirect(w, r, other.URL+"/v1/orgDevices", http.StatusFound)
+		default:
+			_, _ = w.Write([]byte(`{"data":[{"type":"orgDevices","id":"A","attributes":{"serialNumber":"A"}}]}`))
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	same, err := abm.New(&abm.Config{BaseURL: api.URL + "/same", HTTPClient: ts.Client(), Token: cfg})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if devices, err := same.GetOrganizationDevices(t.Context()); err != nil || len(devices) != 1 {
+		t.Errorf("GetOrganizationDevices() via same-host redirect = %+v, %v", devices, err)
+	}
+
+	off, err := abm.New(&abm.Config{BaseURL: api.URL + "/other", HTTPClient: ts.Client(), Token: cfg})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := off.GetOrganizationDevices(t.Context()); err == nil {
+		t.Error("GetOrganizationDevices() via off-host redirect error = nil, want error")
+	}
+	if leaked.Load() {
+		t.Error("access token sent to a host the API redirected to")
 	}
 }
