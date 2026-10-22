@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"log/slog"
 	"testing"
 
 	"github.com/brandonweeks/nanoca"
@@ -14,7 +15,7 @@ import (
 func TestNew(t *testing.T) {
 	t.Parallel()
 
-	if _, err := abmauthorizer.New(nil); err == nil {
+	if _, err := abmauthorizer.New(slog.New(slog.DiscardHandler), nil); err == nil {
 		t.Error("New(nil config) error = nil, want error")
 	}
 
@@ -32,7 +33,7 @@ func TestNew(t *testing.T) {
 			Scope:      abm.BusinessScope,
 		},
 	}
-	if _, err := abmauthorizer.New(cfg); err != nil {
+	if _, err := abmauthorizer.New(slog.New(slog.DiscardHandler), cfg); err != nil {
 		t.Errorf("New() error = %v, want success", err)
 	}
 }
