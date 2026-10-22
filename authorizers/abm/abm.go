@@ -4,14 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/brandonweeks/nanoca"
 	"github.com/brandonweeks/nanoca/abm"
 )
 
+// refreshInterval is how often the ABM device list is fetched.
+const refreshInterval = 15 * time.Minute
+
+type deviceLister interface {
+	GetOrganizationDevices(ctx context.Context) ([]abm.Device, error)
+}
+
 // ABMAuthorizer authorizes devices by checking if they exist in the Apple Business Manager organization
 type ABMAuthorizer struct {
-	client *abm.Client
+	client deviceLister
+
+	mu        sync.Mutex
+	serials   map[string]struct{}
+	fetchedAt time.Time
 }
 
 // New creates a new ABM authorizer with the given configuration
@@ -40,16 +53,35 @@ func (a *ABMAuthorizer) Authorize(ctx context.Context, device *nanoca.DeviceInfo
 		return false, errors.New("device has no permanent identifier (serial number)")
 	}
 
-	devices, err := a.client.GetOrganizationDevices(ctx)
+	serials, err := a.organizationSerials(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check device authorization with ABM: %w", err)
 	}
 
-	for _, d := range devices {
-		if d.SerialNumber == serialNumber {
-			return true, nil
-		}
+	_, ok := serials[serialNumber]
+	return ok, nil
+}
+
+// organizationSerials returns the cached serial set, refreshing it from ABM
+// when it is older than refreshInterval. The lock is held across the fetch
+// so concurrent callers share one refresh.
+func (a *ABMAuthorizer) organizationSerials(ctx context.Context) (map[string]struct{}, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.serials != nil && time.Since(a.fetchedAt) < refreshInterval {
+		return a.serials, nil
 	}
 
-	return false, nil
+	devices, err := a.client.GetOrganizationDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	serials := make(map[string]struct{}, len(devices))
+	for _, d := range devices {
+		serials[d.SerialNumber] = struct{}{}
+	}
+	a.serials = serials
+	a.fetchedAt = time.Now()
+	return serials, nil
 }

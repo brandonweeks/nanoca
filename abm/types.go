@@ -22,9 +22,13 @@ type deviceData struct {
 	Attributes Device `json:"attributes"`
 }
 
-// devicesResponse represents the JSON:API response from the Get Organization Devices endpoint
+// devicesResponse represents one page of the JSON:API response from the
+// Get Organization Devices endpoint
 type devicesResponse struct {
-	Data []deviceData `json:"data"`
+	Data  []deviceData `json:"data"`
+	Links struct {
+		Next string `json:"next"`
+	} `json:"links"`
 }
 
 // ErrorResponse represents an error response from the ABM API
