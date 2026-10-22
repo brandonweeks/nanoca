@@ -14,7 +14,7 @@ import (
 func TestNew(t *testing.T) {
 	t.Parallel()
 
-	if _, err := abmauthorizer.New(t.Context(), nil); err == nil {
+	if _, err := abmauthorizer.New(nil); err == nil {
 		t.Error("New(nil config) error = nil, want error")
 	}
 
@@ -22,8 +22,17 @@ func TestNew(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
-	cfg := &abm.Config{JWTConfig: &abm.JWTConfig{ClientID: "id", PrivateKey: key}}
-	if _, err := abmauthorizer.New(t.Context(), cfg); err != nil {
+	cfg := &abm.Config{
+		BaseURL: abm.BusinessBaseURL,
+		Token: abm.TokenConfig{
+			ClientID:   "id",
+			KeyID:      "key-id",
+			PrivateKey: key,
+			TokenURL:   abm.BusinessTokenURL,
+			Scope:      abm.BusinessScope,
+		},
+	}
+	if _, err := abmauthorizer.New(cfg); err != nil {
 		t.Errorf("New() error = %v, want success", err)
 	}
 }

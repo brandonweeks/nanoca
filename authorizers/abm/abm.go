@@ -28,8 +28,8 @@ type ABMAuthorizer struct {
 }
 
 // New creates a new ABM authorizer with the given configuration
-func New(ctx context.Context, config *abm.Config) (*ABMAuthorizer, error) {
-	client, err := abm.New(ctx, config)
+func New(config *abm.Config) (*ABMAuthorizer, error) {
+	client, err := abm.New(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ABM client: %w", err)
 	}

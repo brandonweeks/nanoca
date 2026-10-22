@@ -11,30 +11,33 @@ import (
 
 // Client provides access to Apple Business Manager API
 type Client struct {
-	config     *Config
 	httpClient *http.Client
 	baseURL    string
 }
 
 // New creates a new ABM API client with the given configuration
-func New(ctx context.Context, config *Config) (*Client, error) {
+func New(config *Config) (*Client, error) {
 	if config == nil {
 		return nil, errors.New("config cannot be nil")
 	}
-
-	if config.JWTConfig == nil {
-		return nil, errors.New("JWT configuration is required for Apple Business Manager API")
+	if config.BaseURL == "" {
+		return nil, errors.New("base URL is required")
 	}
 
-	httpClient, err := CreateJWTClient(ctx, config.JWTConfig)
+	httpClient := config.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	tokenSource, err := NewTokenSource(httpClient, config.Token)
 	if err != nil {
-		return nil, fmt.Errorf("JWT authentication setup failed: %w", err)
+		return nil, fmt.Errorf("token source setup failed: %w", err)
 	}
 
+	apiClient := *httpClient
+	apiClient.Transport = &Transport{Source: tokenSource, Base: httpClient.Transport}
 	return &Client{
-		config:     config,
-		httpClient: httpClient,
-		baseURL:    baseURL,
+		httpClient: &apiClient,
+		baseURL:    config.BaseURL,
 	}, nil
 }
 
