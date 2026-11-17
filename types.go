@@ -26,6 +26,10 @@ type DeviceInfo struct {
 	PublicKey           crypto.PublicKey
 	PermanentIdentifier *PermanentIdentifier
 	HardwareModule      *HardwareModule
+	// Unattested marks a device the UnattestedAuthorizer admitted: no key
+	// or identity was attested, so PublicKey and the identities are nil.
+	// Only nanoca sets it; a verifier that does fails.
+	Unattested bool
 }
 
 // PermanentIdentifier represents a permanent-identifier as defined in RFC 4043.
@@ -288,7 +292,10 @@ type Challenge struct {
 	// challenge response, verbatim: finalize re-verifies it, and a decoded
 	// copy would not survive storage serialization intact (CBOR byte
 	// strings do not round-trip through JSON).
-	Attestation []byte       `json:"attestation,omitempty"`
+	Attestation []byte `json:"attestation,omitempty"`
+	// Unattested records that the UnattestedAuthorizer validated the
+	// challenge, which then has no Attestation. Stored, never presented.
+	Unattested  bool         `json:"unattested,omitempty"`
 	Reservation *Reservation `json:"reservation,omitempty"`
 }
 
@@ -342,6 +349,15 @@ func (c *Challenge) settleValid(validated time.Time, attestation []byte) {
 	c.Status = ChallengeStatusValid
 	c.Validated = &validated
 	c.Attestation = attestation
+	c.Unattested = false
+	c.Error = nil
+}
+
+func (c *Challenge) settleValidUnattested(validated time.Time) {
+	c.Status = ChallengeStatusValid
+	c.Validated = &validated
+	c.Attestation = nil
+	c.Unattested = true
 	c.Error = nil
 }
 
@@ -349,6 +365,7 @@ func (c *Challenge) settleInvalid(validated time.Time, problem *Problem) {
 	c.Status = ChallengeStatusInvalid
 	c.Validated = &validated
 	c.Attestation = nil
+	c.Unattested = false
 	c.Error = problem
 }
 
@@ -356,6 +373,7 @@ func (c *Challenge) settlePending() {
 	c.Status = ChallengeStatusPending
 	c.Validated = nil
 	c.Attestation = nil
+	c.Unattested = false
 	c.Error = nil
 }
 
@@ -369,6 +387,8 @@ type FinalizeRequest struct {
 
 type CertificateIssuer interface {
 	// The deviceInfos slice contains attestation-derived device information.
+	// An entry with Unattested set (see UnattestedAuthorizer) has no
+	// PublicKey and no identity; certify the CSR key and name no device.
 	//
 	// An error that is (or wraps) a *Problem is returned to the client
 	// verbatim: BadCSR rejects the CSR but leaves the order ready for an

@@ -220,6 +220,7 @@ func testRoundTrip(t *testing.T, s nanoca.Storage) {
 		Validated:   ptr(written),
 		Error:       nanoca.Unauthorized("device not authorized"),
 		Attestation: []byte{0xa3, 0x00, 0xff, 0x10},
+		Unattested:  true,
 		Reservation: &nanoca.Reservation{Token: "t2", ReservedAt: written},
 		CreatedAt:   written,
 	}

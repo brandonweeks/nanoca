@@ -39,6 +39,33 @@ mux := http.NewServeMux()
 mux.Handle("/", ca.Handler())
 ```
 
+## Devices that cannot attest
+
+Apple's ACME client answers `device-attest-01` with `{}`, no attestation
+object, whenever the device has none to give. That covers macOS VMs and
+Macs without a T2, which must use `Attest` false, and the devices Apple
+[lists](https://github.com/apple/device-management/blob/release/mdm/profiles/com.apple.security.acme.yaml)
+as ignoring `Attest`: T2 Macs, and iPads and Apple TVs with an A10X Fusion
+or earlier that still run iPadOS or tvOS 16 or later. The client orders
+the payload's `ClientIdentifier` as a `permanent-identifier` either way.
+By default nanoca rejects that answer as malformed.
+
+`nanoca.WithUnattestedAuthorizer` lets your code decide those answers.
+Nothing is attested and the `Authorizer` is never called for them, so with
+this option set, any client that answers without an attestation is judged
+by your code alone, including a device that could have attested. It is the
+whole security boundary for these certificates: treat the identifier as a
+one-time secret, never a serial number.
+
+An admitted device gets a certificate for its CSR key that names no
+device, and the key must be ECDSA P-256 or stronger, or RSA of at least
+2048 bits. Such a certificate looks like any other without a device SAN,
+so issue it from a separate CA if relying parties need to tell them apart;
+issuers see `DeviceInfo.Unattested`.
+
+[`examples/unattested`](examples/unattested) has a one-time-token gate to
+copy.
+
 ## Deployment
 
 - Terminate TLS on the listener or in a proxy in front of the handler. The

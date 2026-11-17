@@ -17,6 +17,7 @@ type CA struct {
 	authorizer        Authorizer
 	observers         []IssuanceObserver
 	verifiers         map[string]AttestationVerifier
+	unattested        UnattestedAuthorizer
 
 	baseURL          string
 	prefix           string
@@ -45,6 +46,14 @@ func WithVerifier(v AttestationVerifier) Option {
 			panic(fmt.Sprintf("attestation verifier for format %q already registered", format))
 		}
 		ca.verifiers[format] = v
+	}
+}
+
+// WithUnattestedAuthorizer sets the UnattestedAuthorizer that decides
+// device-attest-01 answers carrying no attestation object.
+func WithUnattestedAuthorizer(a UnattestedAuthorizer) Option {
+	return func(ca *CA) {
+		ca.unattested = a
 	}
 }
 
