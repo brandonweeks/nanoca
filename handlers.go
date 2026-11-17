@@ -933,11 +933,50 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		AttStmt: attObj.AttStmt,
 	}
 
-	// The reservation is the persisted processing status under a lease:
-	// duplicate POSTs — concurrent, cross-process, or retries within the
-	// lease — are answered with the current state instead of a second
-	// validation, and a validation interrupted by a crash is reclaimed by
-	// a retry once the lease lapses.
+	ca.validateChallenge(ctx, w, challenge, authz, func() (func(*Challenge), error) {
+		deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
+		if err != nil {
+			ca.logger.ErrorContext(ctx, "Attestation verification failed", "challenge_id", challenge.ID, "error", err)
+			return nil, Unauthorized("Attestation verification failed")
+		}
+		// Reject an attestation that has no device identity or no public
+		// key. Finalize builds the certificate SANs from the DeviceInfo and
+		// rejects a CSR for any other key. If the challenge became valid
+		// here, the order could never finalize.
+		if deviceInfo == nil || deviceInfo.PublicKey == nil {
+			ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity or key", "challenge_id", challenge.ID, "format", attObj.Format)
+			return nil, Unauthorized("Attestation yielded no device identity or key")
+		}
+
+		authorized, err := ca.authorizer.Authorize(ctx, deviceInfo)
+		if err != nil {
+			ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
+			// Only the text, not the chain: whatever the authorizer returns
+			// is a backend condition, never a verdict validateChallenge
+			// would act on.
+			return nil, fmt.Errorf("authorizer: %s", err.Error())
+		}
+		if !authorized {
+			ca.logger.WarnContext(ctx, "Device not authorized", "challenge_id", challenge.ID)
+			return nil, Unauthorized("Device not authorized for certificate issuance")
+		}
+
+		return func(c *Challenge) { c.settleValid(time.Now(), attObjBytes) }, nil
+	})
+}
+
+// validateChallenge reserves a challenge for validation, runs decide under
+// the reservation, and settles its verdict. decide returns how to shape the
+// valid record, or an error: a *Problem is a verdict that fails the
+// challenge, and any other error is a backend failure that settles it back
+// to pending for a retry, as failOrder treats finalize errors.
+//
+// The reservation is the persisted processing status under a lease:
+// duplicate POSTs — concurrent, cross-process, or retries within the
+// lease — are answered with the current state instead of a second
+// validation, and a validation interrupted by a crash is reclaimed by
+// a retry once the lease lapses.
+func (ca *CA) validateChallenge(ctx context.Context, w http.ResponseWriter, challenge *Challenge, authz *Authorization, decide func() (settle func(*Challenge), err error)) {
 	reservationToken := randomID(16)
 	if err := ca.storage.ReserveChallengeValidation(ctx, challenge.ID, reservationToken, ca.reservationLease); err != nil {
 		if lostRace(err) {
@@ -949,29 +988,15 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	deviceInfo, err := verifier.Verify(ctx, stmt, []byte(challenge.Token))
-	if err != nil {
-		ca.logger.ErrorContext(ctx, "Attestation verification failed", "challenge_id", challenge.ID, "error", err)
-		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation verification failed"))
+	settle, err := decide()
+	if prob, ok := errors.AsType[*Problem](err); ok {
+		ca.failChallenge(ctx, w, challenge, authz, reservationToken, prob)
 		return
 	}
-	// Reject an attestation that has no device identity or no public key.
-	// Finalize builds the certificate SANs from the DeviceInfo and rejects a
-	// CSR for any other key. If the challenge became valid here, the order
-	// could never finalize.
-	if deviceInfo == nil || deviceInfo.PublicKey == nil {
-		ca.logger.ErrorContext(ctx, "Attestation verifier returned no device identity or key", "challenge_id", challenge.ID, "format", attObj.Format)
-		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Attestation yielded no device identity or key"))
-		return
-	}
-
-	authorized, err := ca.authorizer.Authorize(ctx, deviceInfo)
 	if err != nil {
-		ca.logger.ErrorContext(ctx, "Device authorization check failed", "challenge_id", challenge.ID, "error", err)
-
-		// A failed authorizer call is a backend condition, not a verdict on
-		// the attestation; settle back to pending so a retry can validate
-		// once it clears, instead of invalidating the challenge.
+		// A backend failure is not a verdict on the device; settle back
+		// to pending so a retry can validate once it clears, instead of
+		// invalidating the challenge.
 		challenge.settlePending()
 		if releaseErr := ca.storage.SettleChallenge(ctx, challenge, reservationToken); releaseErr != nil {
 			// A lost race means another request settled the
@@ -986,13 +1011,7 @@ func (ca *CA) handleChallengeResponse(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	if !authorized {
-		ca.logger.WarnContext(ctx, "Device not authorized", "challenge_id", challenge.ID)
-		ca.failChallenge(ctx, w, challenge, authz, reservationToken, Unauthorized("Device not authorized for certificate issuance"))
-		return
-	}
-
-	challenge.settleValid(time.Now(), attObjBytes)
+	settle(challenge)
 	if err := ca.storage.SettleChallenge(ctx, challenge, reservationToken); err != nil {
 		// Another writer settled the challenge first; report its result.
 		if lostRace(err) {

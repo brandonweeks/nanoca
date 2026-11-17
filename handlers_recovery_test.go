@@ -442,3 +442,44 @@ func TestStrandedChallengeRecoversByAuthzPolling(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// problemErrorAuthorizer fails once with an error that is a *Problem, as a
+// third-party authorizer might, and then admits the device.
+type problemErrorAuthorizer struct {
+	mu     sync.Mutex
+	failed bool
+}
+
+func (a *problemErrorAuthorizer) Authorize(context.Context, *nanoca.DeviceInfo) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.failed {
+		a.failed = true
+		return false, nanoca.Unauthorized("backend refused the lookup")
+	}
+	return true, nil
+}
+
+// An Authorizer error is a backend condition whatever its type: only a
+// verdict nanoca builds itself may invalidate the challenge.
+func TestAuthorizerProblemErrorIsTransient(t *testing.T) {
+	t.Parallel()
+
+	ts, _ := newTestServer(t, testServerConfig{authorizer: &problemErrorAuthorizer{}})
+	client := newACMEClient(t, ts)
+
+	_, chal := pendingChallenge(t, client)
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err == nil {
+		t.Fatal("Accept() error = nil, want failure from the authorizer error")
+	}
+	got, err := client.GetChallenge(t.Context(), chal.URI)
+	if err != nil {
+		t.Fatalf("GetChallenge() error = %v", err)
+	}
+	if got.Status != acme.StatusPending {
+		t.Fatalf("challenge status after authorizer error = %q, want %q", got.Status, acme.StatusPending)
+	}
+	if err := submitAttObj(t, client, chal, nullAttObj(t)); err != nil {
+		t.Fatalf("retry Accept() error = %v", err)
+	}
+}
