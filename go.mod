@@ -8,7 +8,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/micromdm/nanolib v0.5.2
 	github.com/micromdm/nanomdm v0.9.0
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.59.0
 	golang.org/x/oauth2 v0.38.0
 )
 
@@ -28,6 +28,6 @@ require (
 	go.opentelemetry.io/otel/log v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
